@@ -12,9 +12,6 @@ use crate::services::copilot_auth::{
     CopilotTokenManager, COPILOT_EDITOR_VERSION, COPILOT_INTEGRATION_ID, COPILOT_OPENAI_INTENT,
 };
 
-/// Haiku model used in smart mode (0.33x premium request multiplier vs 1x for Sonnet).
-const SMART_MODE_MODEL: &str = "claude-haiku-4-5-20250101";
-
 #[derive(Clone)]
 pub struct CopilotRouterConfig {
     pub github_token: String,
@@ -87,10 +84,10 @@ async fn handle_messages(
     let smart_mode = std::env::var("AIVO_SMART_MODE").is_ok();
 
     // Convert Anthropic Messages → OpenAI Chat Completions.
-    // smart_mode controls both model selection and tool schema simplification.
+    // smart_mode enables tool schema simplification.
     let openai_req = anthropic_to_openai(&body, smart_mode);
 
-    // Use the model name that anthropic_to_openai selected (may be overridden by smart_mode).
+    // Get the model name for the response wrapper.
     let model = openai_req
         .get("model")
         .and_then(|m| m.as_str())
@@ -236,13 +233,7 @@ fn anthropic_to_openai(body: &Value, smart_mode: bool) -> Value {
         .get("model")
         .and_then(|m| m.as_str())
         .unwrap_or("claude-sonnet-4-20250514");
-    // Smart mode: route to Haiku (0.33x multiplier) unless model is already Haiku.
-    let effective_model = if smart_mode && raw_model.starts_with("claude-") && !raw_model.contains("haiku") {
-        SMART_MODE_MODEL
-    } else {
-        raw_model
-    };
-    let model = copilot_model_name(effective_model);
+    let model = copilot_model_name(raw_model);
 
     let mut req = json!({
         "model": model,
