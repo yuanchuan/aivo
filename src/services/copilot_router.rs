@@ -245,8 +245,7 @@ async fn handle_messages(
     }
 
     // Convert Anthropic Messages → OpenAI Chat Completions.
-    // smart_mode enables tool schema simplification.
-    let openai_req = anthropic_to_openai(&body, smart_mode);
+    let openai_req = anthropic_to_openai(&body);
 
     // Get the model name for the response wrapper.
     let model = openai_req
@@ -351,7 +350,7 @@ fn copilot_model_name(model: &str) -> String {
 
 // --- Request conversion: Anthropic Messages → OpenAI Chat Completions ---
 
-fn anthropic_to_openai(body: &Value, smart_mode: bool) -> Value {
+fn anthropic_to_openai(body: &Value) -> Value {
     let mut messages: Vec<Value> = Vec::new();
 
     // System message
@@ -422,7 +421,7 @@ fn anthropic_to_openai(body: &Value, smart_mode: bool) -> Value {
         req["stop"] = ss.clone();
     }
 
-    // tools - with optimization: simplify schemas to reduce token count
+    // tools
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
         let openai_tools: Vec<Value> = tools
             .iter()
@@ -432,20 +431,12 @@ fn anthropic_to_openai(body: &Value, smart_mode: bool) -> Value {
                 let empty = json!({});
                 let params = tool.get("input_schema").unwrap_or(&empty);
 
-                // Apply tool schema simplification to reduce token usage
-                // Enabled with --smart flag or AIVO_SMART_MODE env var
-                let simplified_params = if smart_mode {
-                    simplify_parameters(params)
-                } else {
-                    params.clone()
-                };
-
                 json!({
                     "type": "function",
                     "function": {
                         "name": name,
                         "description": description,
-                        "parameters": simplified_params,
+                        "parameters": params,
                     }
                 })
             })
@@ -474,68 +465,6 @@ fn anthropic_to_openai(body: &Value, smart_mode: bool) -> Value {
     }
 
     req
-}
-
-/// Simplifies JSON Schema parameters to reduce token count.
-///
-/// This optimization reduces Copilot credit usage by stripping verbose metadata
-/// from tool definitions that Claude Code sends. Native Copilot agents use
-/// simpler tool schemas, so we strip: title, description, examples, default,
-/// $schema, $defs, etc. while preserving: type, properties, required, enum.
-///
-/// This can reduce tool definition size by 30-50%, significantly saving credits.
-fn simplify_parameters(schema: &Value) -> Value {
-    match schema {
-        Value::Object(map) => {
-            let mut simplified = serde_json::Map::new();
-
-            // Always keep type and properties
-            if let Some(t) = map.get("type") {
-                simplified.insert("type".to_string(), t.clone());
-            }
-
-            if let Some(props) = map.get("properties") {
-                // Recursively simplify each property
-                let simplified_props = match props {
-                    Value::Object(props_map) => {
-                        let mut new_props = serde_json::Map::new();
-                        for (key, val) in props_map {
-                            new_props.insert(key.clone(), simplify_parameters(val));
-                        }
-                        Value::Object(new_props)
-                    }
-                    _ => props.clone(),
-                };
-                simplified.insert("properties".to_string(), simplified_props);
-            }
-
-            // Keep required as-is (array of strings, usually small)
-            if let Some(req) = map.get("required") {
-                simplified.insert("required".to_string(), req.clone());
-            }
-
-            // Keep enum if present (reduces ambiguity)
-            if let Some(en) = map.get("enum") {
-                simplified.insert("enum".to_string(), en.clone());
-            }
-
-            // Keep items for array types
-            if let Some(items) = map.get("items") {
-                simplified.insert("items".to_string(), simplify_parameters(items));
-            }
-
-            // Strip these verbose fields:
-            // - title, description (descriptions already on tool itself)
-            // - examples, default (not needed for API)
-            // - $schema, $id, definitions, $defs (metadata)
-            // - const, readOnly, writeOnly (rarely needed)
-
-            Value::Object(simplified)
-        }
-        // For arrays, simplify each element
-        Value::Array(arr) => Value::Array(arr.iter().map(simplify_parameters).collect()),
-        _ => schema.clone(),
-    }
 }
 
 /// Converts Anthropic content blocks to OpenAI messages.
@@ -904,56 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn test_simplify_parameters_removes_verbose_fields() {
-        let verbose_schema = json!({
-            "type": "object",
-            "title": "My Object",
-            "description": "A verbose description",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "title": "Name",
-                    "description": "The name field",
-                    "examples": ["test", "example"],
-                    "default": "unknown"
-                },
-                "count": {
-                    "type": "integer",
-                    "default": 0
-                }
-            },
-            "required": ["name"],
-            "default": {}
-        });
-
-        let simplified = simplify_parameters(&verbose_schema);
-        let simplified_obj = simplified.as_object().unwrap();
-
-        // Should keep type, properties, required
-        assert_eq!(simplified_obj.get("type").unwrap(), "object");
-        assert!(simplified_obj.get("properties").is_some());
-        assert!(simplified_obj.get("required").is_some());
-
-        // Should strip verbose fields
-        assert!(!simplified_obj.contains_key("title"));
-        assert!(!simplified_obj.contains_key("description"));
-        assert!(!simplified_obj.contains_key("default"));
-        assert!(!simplified_obj.contains_key("examples"));
-
-        // Property should be simplified too
-        let props = simplified_obj
-            .get("properties")
-            .unwrap()
-            .as_object()
-            .unwrap();
-        let name_prop = props.get("name").unwrap().as_object().unwrap();
-        assert!(!name_prop.contains_key("title"));
-        assert!(!name_prop.contains_key("description"));
-        assert!(!name_prop.contains_key("examples"));
-        assert!(!name_prop.contains_key("default"));
-    }
-
-    #[test]
     fn test_anthropic_to_openai_basic() {
         let body = json!({
             "model": "claude-sonnet-4",
@@ -965,7 +844,7 @@ mod tests {
                 {"role": "user", "content": "How are you?"}
             ]
         });
-        let result = anthropic_to_openai(&body, false);
+        let result = anthropic_to_openai(&body);
         let messages = result["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 4); // system + 3 messages
         assert_eq!(messages[0]["role"], "system");
@@ -986,7 +865,7 @@ mod tests {
             "system": [{"type": "text", "text": "System prompt."}],
             "messages": [{"role": "user", "content": "Hi"}]
         });
-        let result = anthropic_to_openai(&body, false);
+        let result = anthropic_to_openai(&body);
         let messages = result["messages"].as_array().unwrap();
         assert_eq!(messages[0]["content"], "System prompt.");
     }
@@ -1007,7 +886,7 @@ mod tests {
                 ]}
             ]
         });
-        let result = anthropic_to_openai(&body, false);
+        let result = anthropic_to_openai(&body);
         let messages = result["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         // Assistant message with tool calls
@@ -1035,7 +914,7 @@ mod tests {
                 "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}}
             }]
         });
-        let result = anthropic_to_openai(&body, false);
+        let result = anthropic_to_openai(&body);
         let tools = result["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
@@ -1051,7 +930,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "stop_sequences": ["\n\nHuman:"]
         });
-        let result = anthropic_to_openai(&body, false);
+        let result = anthropic_to_openai(&body);
         assert_eq!(result["stop"][0], "\n\nHuman:");
     }
 
@@ -1239,7 +1118,7 @@ mod tests {
             "tools": [{"name": "test", "description": "test", "input_schema": {}}],
             "tool_choice": {"type": "auto"}
         });
-        let req = anthropic_to_openai(&body, false);
+        let req = anthropic_to_openai(&body);
         assert_eq!(req["tool_choice"], json!("auto"));
     }
 
@@ -1251,7 +1130,7 @@ mod tests {
             "tools": [{"name": "test", "description": "test", "input_schema": {}}],
             "tool_choice": {"type": "any"}
         });
-        let req = anthropic_to_openai(&body, false);
+        let req = anthropic_to_openai(&body);
         assert_eq!(req["tool_choice"], json!("required"));
     }
 
@@ -1263,7 +1142,7 @@ mod tests {
             "tools": [{"name": "read_file", "description": "read", "input_schema": {}}],
             "tool_choice": {"type": "tool", "name": "read_file"}
         });
-        let req = anthropic_to_openai(&body, false);
+        let req = anthropic_to_openai(&body);
         assert_eq!(
             req["tool_choice"],
             json!({"type": "function", "function": {"name": "read_file"}})
@@ -1276,7 +1155,7 @@ mod tests {
             "model": "claude-sonnet-4-6",
             "messages": [{"role": "user", "content": "hi"}],
         });
-        let req = anthropic_to_openai(&body, false);
+        let req = anthropic_to_openai(&body);
         assert!(req.get("tool_choice").is_none());
     }
 }

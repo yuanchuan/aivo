@@ -74,15 +74,14 @@ aivo chat --model claude-sonnet-4.6
 
 #### Smart Mode
 
-When routing Claude Code through Copilot, use `--smart` to enable optimizations:
+When routing Claude Code through Copilot, use `--smart` to enable smart routing:
 
 ```bash
 aivo claude --smart
 ```
 
 **What it does:**
-- **Tool schema simplification**: Strips verbose JSON Schema fields (`title`, `description`, `examples`, `default`, etc.) keeping only essential ones (`type`, `properties`, `required`, `enum`)
-- Reduces tool definition size by ~35%, directly saving Copilot credits
+- Intercepts read-only tools (`glob`, `ls`, `read_file`, `grep`) and executes them locally without sending to Copilot
 
 This only applies to Copilot connections.
 
