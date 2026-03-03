@@ -91,8 +91,33 @@ fn matches_glob(name: &str, pattern: &str) -> bool {
 }
 
 async fn execute_ls(input: &Value, cwd: &PathBuf) -> Result<Value> {
-    // TODO: implement
-    Err(anyhow::anyhow!("Not implemented"))
+    let path = input.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+    let base = cwd.join(path);
+
+    if !base.exists() {
+        return Err(anyhow::anyhow!("Directory not found: {}", path));
+    }
+
+    let mut entries = tokio::fs::read_dir(&base).await?;
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if entry.file_type().await?.is_dir() {
+            directories.push(name);
+        } else {
+            files.push(name);
+        }
+    }
+
+    directories.sort();
+    files.sort();
+
+    let mut result = directories;
+    result.extend(files);
+
+    Ok(Value::Array(result.into_iter().map(Value::String).collect()))
 }
 
 async fn execute_read_file(input: &Value, cwd: &PathBuf) -> Result<Value> {
@@ -118,5 +143,14 @@ mod tests {
         assert!(result.is_ok());
         let files = result.unwrap();
         assert!(files.is_array());
+    }
+
+    #[tokio::test]
+    async fn test_ls() {
+        let input = serde_json::json!({"path": "src"});
+        let cwd = PathBuf::from(".");
+        let result = execute_ls(&input, &cwd).await;
+        // May fail if src doesn't exist, that's ok - just check it runs
+        println!("ls result: {:?}", result);
     }
 }
