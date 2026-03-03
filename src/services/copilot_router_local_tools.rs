@@ -41,27 +41,32 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 /// Join `cwd` with `path` and verify the result stays inside `cwd`.
-/// Also resolves symlinks when the path exists to prevent symlink escapes.
+/// Resolves symlinks when the path exists to prevent symlink escapes.
 fn safe_join(cwd: &Path, path: &str) -> Result<PathBuf> {
     let joined = normalize_path(&cwd.join(path));
     let cwd_norm = normalize_path(cwd);
 
+    // If path exists, canonicalize both to resolve symlinks
+    if joined.exists() {
+        let canonical = joined
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Failed to resolve path: {}", e))?;
+        let cwd_canonical = cwd
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Failed to resolve working directory: {}", e))?;
+        if !canonical.starts_with(&cwd_canonical) {
+            return Err(anyhow::anyhow!(
+                "Access denied: path escapes working directory"
+            ));
+        }
+        return Ok(canonical);
+    }
+
+    // For non-existent paths, check normalized form
     if !joined.starts_with(&cwd_norm) {
         return Err(anyhow::anyhow!(
             "Access denied: path escapes working directory"
         ));
-    }
-
-    // Also check resolved symlinks if path exists
-    if joined.exists() {
-        let canonical = joined.canonicalize()?;
-        let cwd_canonical = cwd.canonicalize().unwrap_or(cwd_norm);
-        if !canonical.starts_with(&cwd_canonical) {
-            return Err(anyhow::anyhow!(
-                "Access denied: symlink escapes working directory"
-            ));
-        }
-        return Ok(canonical);
     }
 
     Ok(joined)
@@ -72,6 +77,7 @@ fn safe_join(cwd: &Path, path: &str) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+const MAX_FILES_TO_SCAN: usize = 10_000; // Prevent memory exhaustion
 
 async fn execute_glob(input: &Value, cwd: &Path) -> Result<Value> {
     let pattern = input.get("pattern").and_then(|p| p.as_str()).unwrap_or("*");
@@ -112,11 +118,10 @@ fn walkdir(root: &Path, base: &Path, pattern: &str, results: &mut Vec<String>) -
             .unwrap_or_default();
 
         if path.is_dir() {
-            // Always recurse into directories - pattern may match files inside
-            let remaining_pattern = pattern.strip_prefix(&format!("{}/", name))
-                .or_else(|| pattern.strip_prefix(name))
-                .unwrap_or(pattern);
-            walkdir(root, &path, remaining_pattern, results)?;
+            // Always recurse for ** patterns or when pattern could match inside
+            if pattern.starts_with("**") || pattern.contains("/") {
+                walkdir(root, &path, pattern, results)?;
+            }
         } else if matches_glob(&relative, pattern) {
             results.push(relative);
         }
@@ -307,13 +312,25 @@ async fn execute_grep(input: &Value, cwd: &Path) -> Result<Value> {
 }
 
 fn collect_files_sync(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_files_recursive(dir, &mut files)?;
+    Ok(files)
+}
+
+fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     use std::fs;
 
-    let mut files = Vec::new();
+    // Prevent unbounded recursion and memory exhaustion
+    if files.len() >= MAX_FILES_TO_SCAN {
+        return Err(anyhow::anyhow!(
+            "Too many files to scan (max {})",
+            MAX_FILES_TO_SCAN
+        ));
+    }
 
     for entry in match fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(_) => return Ok(files),
+        Err(_) => return Ok(()),
     } {
         let entry = entry?;
         let path = entry.path();
@@ -324,15 +341,13 @@ fn collect_files_sync(dir: &Path) -> Result<Vec<PathBuf>> {
         }
 
         if path.is_dir() {
-            if let Ok(mut sub) = collect_files_sync(&path) {
-                files.append(&mut sub);
-            }
+            collect_files_recursive(&path, files)?;
         } else {
             files.push(path);
         }
     }
 
-    Ok(files)
+    Ok(())
 }
 
 #[cfg(test)]

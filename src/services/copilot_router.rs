@@ -104,11 +104,17 @@ async fn try_local_tool_execution(body: &Value, cwd: &std::path::Path) -> Option
                         return Some(json!({
                             "type": "message",
                             "id": format!("msg_local_{}", id),
-                            "role": "user",
+                            "role": "assistant",
+                            "model": "local",
+                            "stop_reason": "end_turn",
+                            "stop_sequence": null,
+                            "usage": {
+                                "input_tokens": 0,
+                                "output_tokens": 0
+                            },
                             "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": id,
-                                "content": content_str
+                                "type": "text",
+                                "text": content_str
                             }]
                         }));
                     }
@@ -117,11 +123,17 @@ async fn try_local_tool_execution(body: &Value, cwd: &std::path::Path) -> Option
                         return Some(json!({
                             "type": "message",
                             "id": format!("msg_local_{}", id),
-                            "role": "user",
+                            "role": "assistant",
+                            "model": "local",
+                            "stop_reason": "end_turn",
+                            "stop_sequence": null,
+                            "usage": {
+                                "input_tokens": 0,
+                                "output_tokens": 0
+                            },
                             "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": id,
-                                "content": format!("Error: {}", e)
+                                "type": "text",
+                                "text": format!("Error: {}", e)
                             }]
                         }));
                     }
