@@ -8,9 +8,11 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use crate::services::copilot_router_local_tools::execute_local_tool;
 use crate::services::copilot_auth::{
     CopilotTokenManager, COPILOT_EDITOR_VERSION, COPILOT_INTEGRATION_ID, COPILOT_OPENAI_INTENT,
 };
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct CopilotRouterConfig {
@@ -67,6 +69,75 @@ async fn run_router(
     }
 }
 
+/// Try to execute a tool locally in smart mode.
+/// Returns Some(response) if tool was executed, None otherwise.
+async fn try_local_tool_execution(body: &Value, cwd: &PathBuf) -> Option<Value> {
+    let messages = body.get("messages")?.as_array()?;
+    let last_msg = messages.last()?;
+
+    let content = last_msg.get("content")?.as_array()?;
+
+    for block in content {
+        let block_type = block.get("type")?.as_str()?;
+
+        if block_type == "tool_use" {
+            let name = block.get("name")?.as_str()?;
+            let input = block.get("input")?;
+            let id = block.get("id")?.as_str()?;
+
+            // Only intercept read-only tools
+            let local_tools = ["glob", "ls", "read_file", "grep"];
+            if local_tools.contains(&name) {
+                match execute_local_tool(name, input, cwd).await {
+                    Ok(result) => {
+                        // Convert to Anthropic tool_result format
+                        let content_str = match &result {
+                            Value::Array(arr) => arr.iter()
+                                .map(|v| v.as_str().unwrap_or("").to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            Value::String(s) => s.clone(),
+                            _ => result.to_string(),
+                        };
+
+                        return Some(json!({
+                            "type": "message",
+                            "id": format!("msg_local_{}", id),
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": id,
+                                "content": content_str
+                            }]
+                        }));
+                    }
+                    Err(e) => {
+                        // Return error to model
+                        return Some(json!({
+                            "type": "message",
+                            "id": format!("msg_local_{}", id),
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": id,
+                                "content": format!("Error: {}", e)
+                            }]
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Convert local result to SSE format for streaming
+fn local_result_to_sse(result: &Value) -> String {
+    let json = serde_json::to_string(result).unwrap_or_default();
+    format!("data: {}\n\n", json)
+}
+
 async fn handle_messages(
     request: &str,
     tm: &Arc<CopilotTokenManager>,
@@ -80,8 +151,35 @@ async fn handle_messages(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
-    // Smart mode: use cheaper Haiku model (0.33x) instead of default Sonnet/Opus.
+    // Smart mode: intercept local tools to save Copilot quota
     let smart_mode = std::env::var("AIVO_SMART_MODE").is_ok();
+
+    // Try local tool execution in smart mode
+    if smart_mode {
+        // Get cwd from request or use default
+        let cwd = body
+            .get("cwd")
+            .and_then(|c| c.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        if let Some(local_result) = try_local_tool_execution(&body, &cwd).await {
+            // Return local result in Anthropic format
+            let response_json = serde_json::to_string(&local_result)?;
+            if is_streaming {
+                return Ok(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                    local_result_to_sse(&local_result)
+                ));
+            } else {
+                return Ok(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_json.len(),
+                    response_json
+                ));
+            }
+        }
+    }
 
     // Convert Anthropic Messages → OpenAI Chat Completions.
     // smart_mode enables tool schema simplification.
