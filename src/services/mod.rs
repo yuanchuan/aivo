@@ -6,6 +6,7 @@ pub mod claude_code_router;
 pub mod codex_router;
 pub mod copilot_auth;
 pub mod copilot_router;
+pub mod copilot_router_local_tools;
 pub mod environment_injector;
 pub mod gemini_router;
 pub mod models_cache;
