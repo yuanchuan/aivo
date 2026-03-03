@@ -8,10 +8,10 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::services::copilot_router_local_tools::execute_local_tool;
 use crate::services::copilot_auth::{
     CopilotTokenManager, COPILOT_EDITOR_VERSION, COPILOT_INTEGRATION_ID, COPILOT_OPENAI_INTENT,
 };
+use crate::services::copilot_router_local_tools::execute_local_tool;
 use std::path::PathBuf;
 
 #[derive(Clone)]
@@ -71,7 +71,7 @@ async fn run_router(
 
 /// Try to execute a tool locally in smart mode.
 /// Returns Some(response) if tool was executed, None otherwise.
-async fn try_local_tool_execution(body: &Value, cwd: &PathBuf) -> Option<Value> {
+async fn try_local_tool_execution(body: &Value, cwd: &std::path::Path) -> Option<Value> {
     let messages = body.get("messages")?.as_array()?;
     let last_msg = messages.last()?;
 
@@ -92,7 +92,8 @@ async fn try_local_tool_execution(body: &Value, cwd: &PathBuf) -> Option<Value> 
                     Ok(result) => {
                         // Convert to Anthropic tool_result format
                         let content_str = match &result {
-                            Value::Array(arr) => arr.iter()
+                            Value::Array(arr) => arr
+                                .iter()
                                 .map(|v| v.as_str().unwrap_or("").to_string())
                                 .collect::<Vec<_>>()
                                 .join("\n"),
@@ -103,7 +104,7 @@ async fn try_local_tool_execution(body: &Value, cwd: &PathBuf) -> Option<Value> 
                         return Some(json!({
                             "type": "message",
                             "id": format!("msg_local_{}", id),
-                            "role": "assistant",
+                            "role": "user",
                             "content": [{
                                 "type": "tool_result",
                                 "tool_use_id": id,
@@ -116,7 +117,7 @@ async fn try_local_tool_execution(body: &Value, cwd: &PathBuf) -> Option<Value> 
                         return Some(json!({
                             "type": "message",
                             "id": format!("msg_local_{}", id),
-                            "role": "assistant",
+                            "role": "user",
                             "content": [{
                                 "type": "tool_result",
                                 "tool_use_id": id,
@@ -132,10 +133,76 @@ async fn try_local_tool_execution(body: &Value, cwd: &PathBuf) -> Option<Value> 
     None
 }
 
-/// Convert local result to SSE format for streaming
+/// Convert local tool result to Anthropic SSE event stream format.
 fn local_result_to_sse(result: &Value) -> String {
-    let json = serde_json::to_string(result).unwrap_or_default();
-    format!("data: {}\n\n", json)
+    // Extract text content from the tool_result block
+    let text = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|block| block.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    let msg_id = result
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or("msg_local_0");
+
+    let mut events = String::new();
+
+    // message_start
+    events.push_str(&format!(
+        "event: message_start\ndata: {}\n\n",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "local",
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {"input_tokens": 0, "output_tokens": 0}
+            }
+        })
+    ));
+
+    // content_block_start
+    events.push_str(&format!(
+        "event: content_block_start\ndata: {}\n\n",
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+    ));
+
+    // content_block_delta
+    if !text.is_empty() {
+        events.push_str(&format!(
+            "event: content_block_delta\ndata: {}\n\n",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}})
+        ));
+    }
+
+    // content_block_stop
+    events.push_str(&format!(
+        "event: content_block_stop\ndata: {}\n\n",
+        json!({"type": "content_block_stop", "index": 0})
+    ));
+
+    // message_delta
+    events.push_str(&format!(
+        "event: message_delta\ndata: {}\n\n",
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+            "usage": {"output_tokens": 0}
+        })
+    ));
+
+    // message_stop
+    events.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+
+    events
 }
 
 async fn handle_messages(
@@ -156,12 +223,8 @@ async fn handle_messages(
 
     // Try local tool execution in smart mode
     if smart_mode {
-        // Get cwd from request or use default
-        let cwd = body
-            .get("cwd")
-            .and_then(|c| c.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        // Use the actual process cwd, never trusting the request body
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         if let Some(local_result) = try_local_tool_execution(&body, &cwd).await {
             // Return local result in Anthropic format

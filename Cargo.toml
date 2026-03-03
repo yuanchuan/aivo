@@ -45,6 +45,7 @@ dirs = "5.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "2.0"
 anyhow = "1.0"
+regex = "1"
 whoami = "1.5"
 rustyline = "14"
 
