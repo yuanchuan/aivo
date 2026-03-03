@@ -121,8 +121,33 @@ async fn execute_ls(input: &Value, cwd: &PathBuf) -> Result<Value> {
 }
 
 async fn execute_read_file(input: &Value, cwd: &PathBuf) -> Result<Value> {
-    // TODO: implement
-    Err(anyhow::anyhow!("Not implemented"))
+    let path = input
+        .get("path")
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing path parameter"))?;
+
+    let limit = input.get("limit").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+    let offset = input.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+
+    let base = cwd.join(path);
+
+    if !base.exists() {
+        return Err(anyhow::anyhow!("File not found: {}", path));
+    }
+
+    let content = tokio::fs::read_to_string(&base).await?;
+
+    // Apply offset/limit if specified
+    let lines: Vec<&str> = content.lines().collect();
+    let selected = if limit > 0 {
+        lines.iter().skip(offset).take(limit).copied().collect::<Vec<_>>().join("\n")
+    } else if offset > 0 {
+        lines.iter().skip(offset).copied().collect::<Vec<_>>().join("\n")
+    } else {
+        content
+    };
+
+    Ok(Value::String(selected))
 }
 
 async fn execute_grep(input: &Value, cwd: &PathBuf) -> Result<Value> {
@@ -152,5 +177,16 @@ mod tests {
         let result = execute_ls(&input, &cwd).await;
         // May fail if src doesn't exist, that's ok - just check it runs
         println!("ls result: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_read_file() {
+        let input = serde_json::json!({"path": "src/main.rs"});
+        let cwd = PathBuf::from(".");
+        let result = execute_read_file(&input, &cwd).await;
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        assert!(content.is_string());
+        println!("File content length: {}", content.as_str().unwrap_or("").len());
     }
 }
