@@ -66,6 +66,7 @@ impl RunCommand {
     }
 
     /// Executes the run command with the specified AI tool
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute(
         &self,
         tool: Option<&str>,
@@ -74,7 +75,17 @@ impl RunCommand {
         model: Option<String>,
         env: Option<HashMap<String, String>>,
         key_override: Option<ApiKey>,
+        no_optimize: bool,
     ) -> ExitCode {
+        // Inject AIVO_NO_TOOL_SIMPLIFY so CopilotRouter skips schema simplification
+        let env = if no_optimize {
+            let mut env = env.unwrap_or_default();
+            env.insert("AIVO_NO_TOOL_SIMPLIFY".to_string(), "1".to_string());
+            Some(env)
+        } else {
+            env
+        };
+
         match self
             .execute_internal(tool, args, debug, model, env, key_override)
             .await

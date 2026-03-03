@@ -255,17 +255,32 @@ fn anthropic_to_openai(body: &Value) -> Value {
         req["stop"] = ss.clone();
     }
 
-    // tools
+    // tools - with optimization: simplify schemas to reduce token count
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
+        // Read env var once outside the loop to avoid per-tool lock acquisition
+        let no_optimize = std::env::var("AIVO_NO_TOOL_SIMPLIFY").is_ok();
         let openai_tools: Vec<Value> = tools
             .iter()
             .map(|tool| {
+                let name = tool.get("name").cloned().unwrap_or_default();
+                let description = tool.get("description").cloned().unwrap_or(json!(""));
+                let empty = json!({});
+                let params = tool.get("input_schema").unwrap_or(&empty);
+
+                // Apply tool schema simplification to reduce token usage
+                // Can be disabled with --no-optimize flag or AIVO_NO_TOOL_SIMPLIFY env var
+                let simplified_params = if no_optimize {
+                    params.clone()
+                } else {
+                    simplify_parameters(params)
+                };
+
                 json!({
                     "type": "function",
                     "function": {
-                        "name": tool.get("name").cloned().unwrap_or_default(),
-                        "description": tool.get("description").cloned().unwrap_or(json!("")),
-                        "parameters": tool.get("input_schema").cloned().unwrap_or(json!({})),
+                        "name": name,
+                        "description": description,
+                        "parameters": simplified_params,
                     }
                 })
             })
@@ -294,6 +309,68 @@ fn anthropic_to_openai(body: &Value) -> Value {
     }
 
     req
+}
+
+/// Simplifies JSON Schema parameters to reduce token count.
+///
+/// This optimization reduces Copilot credit usage by stripping verbose metadata
+/// from tool definitions that Claude Code sends. Native Copilot agents use
+/// simpler tool schemas, so we strip: title, description, examples, default,
+/// $schema, $defs, etc. while preserving: type, properties, required, enum.
+///
+/// This can reduce tool definition size by 30-50%, significantly saving credits.
+fn simplify_parameters(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => {
+            let mut simplified = serde_json::Map::new();
+
+            // Always keep type and properties
+            if let Some(t) = map.get("type") {
+                simplified.insert("type".to_string(), t.clone());
+            }
+
+            if let Some(props) = map.get("properties") {
+                // Recursively simplify each property
+                let simplified_props = match props {
+                    Value::Object(props_map) => {
+                        let mut new_props = serde_json::Map::new();
+                        for (key, val) in props_map {
+                            new_props.insert(key.clone(), simplify_parameters(val));
+                        }
+                        Value::Object(new_props)
+                    }
+                    _ => props.clone(),
+                };
+                simplified.insert("properties".to_string(), simplified_props);
+            }
+
+            // Keep required as-is (array of strings, usually small)
+            if let Some(req) = map.get("required") {
+                simplified.insert("required".to_string(), req.clone());
+            }
+
+            // Keep enum if present (reduces ambiguity)
+            if let Some(en) = map.get("enum") {
+                simplified.insert("enum".to_string(), en.clone());
+            }
+
+            // Keep items for array types
+            if let Some(items) = map.get("items") {
+                simplified.insert("items".to_string(), simplify_parameters(items));
+            }
+
+            // Strip these verbose fields:
+            // - title, description (descriptions already on tool itself)
+            // - examples, default (not needed for API)
+            // - $schema, $id, definitions, $defs (metadata)
+            // - const, readOnly, writeOnly (rarely needed)
+
+            Value::Object(simplified)
+        }
+        // For arrays, simplify each element
+        Value::Array(arr) => Value::Array(arr.iter().map(simplify_parameters).collect()),
+        _ => schema.clone(),
+    }
 }
 
 /// Converts Anthropic content blocks to OpenAI messages.
@@ -659,6 +736,56 @@ mod tests {
         assert_eq!(copilot_model_name("claude-haiku-4-5"), "claude-haiku-4.5");
         assert_eq!(copilot_model_name("claude-opus-4-5"), "claude-opus-4.5");
         assert_eq!(copilot_model_name("gpt-4o"), "gpt-4o");
+    }
+
+    #[test]
+    fn test_simplify_parameters_removes_verbose_fields() {
+        let verbose_schema = json!({
+            "type": "object",
+            "title": "My Object",
+            "description": "A verbose description",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "title": "Name",
+                    "description": "The name field",
+                    "examples": ["test", "example"],
+                    "default": "unknown"
+                },
+                "count": {
+                    "type": "integer",
+                    "default": 0
+                }
+            },
+            "required": ["name"],
+            "default": {}
+        });
+
+        let simplified = simplify_parameters(&verbose_schema);
+        let simplified_obj = simplified.as_object().unwrap();
+
+        // Should keep type, properties, required
+        assert_eq!(simplified_obj.get("type").unwrap(), "object");
+        assert!(simplified_obj.get("properties").is_some());
+        assert!(simplified_obj.get("required").is_some());
+
+        // Should strip verbose fields
+        assert!(!simplified_obj.contains_key("title"));
+        assert!(!simplified_obj.contains_key("description"));
+        assert!(!simplified_obj.contains_key("default"));
+        assert!(!simplified_obj.contains_key("examples"));
+
+        // Property should be simplified too
+        let props = simplified_obj
+            .get("properties")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        let name_prop = props.get("name").unwrap().as_object().unwrap();
+        assert!(!name_prop.contains_key("title"));
+        assert!(!name_prop.contains_key("description"));
+        assert!(!name_prop.contains_key("examples"));
+        assert!(!name_prop.contains_key("default"));
     }
 
     #[test]

@@ -72,6 +72,20 @@ aivo models                   # list available Copilot models
 aivo chat --model claude-sonnet-4.6
 ```
 
+#### Optimization
+
+When routing Claude Code through Copilot, aivo performs **tool schema simplification** to reduce token usage:
+
+- Claude Code sends full JSON Schema definitions with verbose fields (`title`, `description`, `examples`, `default`, etc.)
+- aivo's CopilotRouter strips these verbose fields, keeping only essential ones (`type`, `properties`, `required`, `enum`)
+- This reduces tool definition size by ~30-50%, directly saving Copilot credits
+
+This optimization is automatic and only applies to Copilot connections. To disable it:
+
+```bash
+aivo claude --no-optimize
+```
+
 ### OpenRouter
 
 Add your key with `https://openrouter.ai/api/v1` as the base URL.

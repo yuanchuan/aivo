@@ -387,14 +387,8 @@ impl UpdateCommand {
 
     /// Delegates update to Homebrew by running `brew upgrade aivo`
     fn update_via_homebrew(&self) -> ExitCode {
-        println!(
-            "{} Updating via Homebrew...",
-            style::arrow_symbol()
-        );
-        match Command::new("brew")
-            .args(["upgrade", "aivo"])
-            .status()
-        {
+        println!("{} Updating via Homebrew...", style::arrow_symbol());
+        match Command::new("brew").args(["upgrade", "aivo"]).status() {
             Ok(status) if status.success() => ExitCode::Success,
             Ok(_) => {
                 // brew upgrade exits non-zero when already up to date
@@ -403,11 +397,7 @@ impl UpdateCommand {
                 ExitCode::Success
             }
             Err(e) => {
-                eprintln!(
-                    "{} Failed to run brew: {}",
-                    style::red("Error:"),
-                    e
-                );
+                eprintln!("{} Failed to run brew: {}", style::red("Error:"), e);
                 ExitCode::UserError
             }
         }
