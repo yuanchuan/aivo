@@ -12,6 +12,9 @@ use crate::services::copilot_auth::{
     CopilotTokenManager, COPILOT_EDITOR_VERSION, COPILOT_INTEGRATION_ID, COPILOT_OPENAI_INTENT,
 };
 
+/// Haiku model used in smart mode (0.33x premium request multiplier vs 1x for Sonnet).
+const SMART_MODE_MODEL: &str = "claude-haiku-4-5-20250101";
+
 #[derive(Clone)]
 pub struct CopilotRouterConfig {
     pub github_token: String,
@@ -79,14 +82,20 @@ async fn handle_messages(
         .get("stream")
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
-    let model = body
+
+    // Smart mode: use cheaper Haiku model (0.33x) instead of default Sonnet/Opus.
+    let smart_mode = std::env::var("AIVO_SMART_MODE").is_ok();
+
+    // Convert Anthropic Messages → OpenAI Chat Completions.
+    // smart_mode controls both model selection and tool schema simplification.
+    let openai_req = anthropic_to_openai(&body, smart_mode);
+
+    // Use the model name that anthropic_to_openai selected (may be overridden by smart_mode).
+    let model = openai_req
         .get("model")
         .and_then(|m| m.as_str())
         .unwrap_or("claude-sonnet-4-20250514")
         .to_string();
-
-    // Convert Anthropic Messages → OpenAI Chat Completions
-    let openai_req = anthropic_to_openai(&body);
 
     // Get a valid Copilot token
     let (copilot_token, api_endpoint) = tm.get_token().await?;
@@ -184,7 +193,7 @@ fn copilot_model_name(model: &str) -> String {
 
 // --- Request conversion: Anthropic Messages → OpenAI Chat Completions ---
 
-fn anthropic_to_openai(body: &Value) -> Value {
+fn anthropic_to_openai(body: &Value, smart_mode: bool) -> Value {
     let mut messages: Vec<Value> = Vec::new();
 
     // System message
@@ -227,7 +236,13 @@ fn anthropic_to_openai(body: &Value) -> Value {
         .get("model")
         .and_then(|m| m.as_str())
         .unwrap_or("claude-sonnet-4-20250514");
-    let model = copilot_model_name(raw_model);
+    // Smart mode: route to Haiku (0.33x multiplier) unless model is already Haiku.
+    let effective_model = if smart_mode && raw_model.starts_with("claude-") && !raw_model.contains("haiku") {
+        SMART_MODE_MODEL
+    } else {
+        raw_model
+    };
+    let model = copilot_model_name(effective_model);
 
     let mut req = json!({
         "model": model,
@@ -257,8 +272,6 @@ fn anthropic_to_openai(body: &Value) -> Value {
 
     // tools - with optimization: simplify schemas to reduce token count
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
-        // Read env var once outside the loop to avoid per-tool lock acquisition
-        let no_optimize = std::env::var("AIVO_NO_TOOL_SIMPLIFY").is_ok();
         let openai_tools: Vec<Value> = tools
             .iter()
             .map(|tool| {
@@ -268,11 +281,11 @@ fn anthropic_to_openai(body: &Value) -> Value {
                 let params = tool.get("input_schema").unwrap_or(&empty);
 
                 // Apply tool schema simplification to reduce token usage
-                // Can be disabled with --no-optimize flag or AIVO_NO_TOOL_SIMPLIFY env var
-                let simplified_params = if no_optimize {
-                    params.clone()
-                } else {
+                // Enabled with --smart flag or AIVO_SMART_MODE env var
+                let simplified_params = if smart_mode {
                     simplify_parameters(params)
+                } else {
+                    params.clone()
                 };
 
                 json!({
@@ -800,7 +813,7 @@ mod tests {
                 {"role": "user", "content": "How are you?"}
             ]
         });
-        let result = anthropic_to_openai(&body);
+        let result = anthropic_to_openai(&body, false);
         let messages = result["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 4); // system + 3 messages
         assert_eq!(messages[0]["role"], "system");
@@ -821,7 +834,7 @@ mod tests {
             "system": [{"type": "text", "text": "System prompt."}],
             "messages": [{"role": "user", "content": "Hi"}]
         });
-        let result = anthropic_to_openai(&body);
+        let result = anthropic_to_openai(&body, false);
         let messages = result["messages"].as_array().unwrap();
         assert_eq!(messages[0]["content"], "System prompt.");
     }
@@ -842,7 +855,7 @@ mod tests {
                 ]}
             ]
         });
-        let result = anthropic_to_openai(&body);
+        let result = anthropic_to_openai(&body, false);
         let messages = result["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         // Assistant message with tool calls
@@ -870,7 +883,7 @@ mod tests {
                 "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}}
             }]
         });
-        let result = anthropic_to_openai(&body);
+        let result = anthropic_to_openai(&body, false);
         let tools = result["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
@@ -886,7 +899,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "stop_sequences": ["\n\nHuman:"]
         });
-        let result = anthropic_to_openai(&body);
+        let result = anthropic_to_openai(&body, false);
         assert_eq!(result["stop"][0], "\n\nHuman:");
     }
 
@@ -1074,7 +1087,7 @@ mod tests {
             "tools": [{"name": "test", "description": "test", "input_schema": {}}],
             "tool_choice": {"type": "auto"}
         });
-        let req = anthropic_to_openai(&body);
+        let req = anthropic_to_openai(&body, false);
         assert_eq!(req["tool_choice"], json!("auto"));
     }
 
@@ -1086,7 +1099,7 @@ mod tests {
             "tools": [{"name": "test", "description": "test", "input_schema": {}}],
             "tool_choice": {"type": "any"}
         });
-        let req = anthropic_to_openai(&body);
+        let req = anthropic_to_openai(&body, false);
         assert_eq!(req["tool_choice"], json!("required"));
     }
 
@@ -1098,7 +1111,7 @@ mod tests {
             "tools": [{"name": "read_file", "description": "read", "input_schema": {}}],
             "tool_choice": {"type": "tool", "name": "read_file"}
         });
-        let req = anthropic_to_openai(&body);
+        let req = anthropic_to_openai(&body, false);
         assert_eq!(
             req["tool_choice"],
             json!({"type": "function", "function": {"name": "read_file"}})
@@ -1111,7 +1124,7 @@ mod tests {
             "model": "claude-sonnet-4-6",
             "messages": [{"role": "user", "content": "hi"}],
         });
-        let req = anthropic_to_openai(&body);
+        let req = anthropic_to_openai(&body, false);
         assert!(req.get("tool_choice").is_none());
     }
 }

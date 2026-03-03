@@ -225,7 +225,7 @@ async fn main() {
                     model,
                     env,
                     key_override,
-                    run_args.no_optimize,
+                    run_args.smart,
                 )
                 .await
         }

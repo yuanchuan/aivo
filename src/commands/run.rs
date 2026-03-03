@@ -75,12 +75,12 @@ impl RunCommand {
         model: Option<String>,
         env: Option<HashMap<String, String>>,
         key_override: Option<ApiKey>,
-        no_optimize: bool,
+        smart: bool,
     ) -> ExitCode {
-        // Inject AIVO_NO_TOOL_SIMPLIFY so CopilotRouter skips schema simplification
-        let env = if no_optimize {
+        // Inject AIVO_SMART_MODE so CopilotRouter enables smart routing/caching
+        let env = if smart {
             let mut env = env.unwrap_or_default();
-            env.insert("AIVO_NO_TOOL_SIMPLIFY".to_string(), "1".to_string());
+            env.insert("AIVO_SMART_MODE".to_string(), "1".to_string());
             Some(env)
         } else {
             env

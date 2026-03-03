@@ -89,9 +89,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub debug: bool,
 
-    /// Disable optimizations (reduces token usage for Copilot)
+    /// Enable smart routing: auto-select cheap models, cache responses, trim context
     #[arg(long)]
-    pub no_optimize: bool,
+    pub smart: bool,
 
     /// Inject environment variable (KEY=VALUE)
     #[arg(short, long = "env", value_name = "KEY=VALUE")]
