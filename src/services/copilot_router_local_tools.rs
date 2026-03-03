@@ -96,10 +96,7 @@ async fn execute_glob(input: &Value, cwd: &Path) -> Result<Value> {
 fn walkdir(root: &Path, base: &Path, pattern: &str, results: &mut Vec<String>) -> Result<()> {
     use std::fs;
 
-    for entry in match fs::read_dir(base) {
-        Ok(rd) => rd,
-        Err(_) => return Ok(()),
-    } {
+    for entry in fs::read_dir(base)? {
         let entry = entry?;
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -115,9 +112,11 @@ fn walkdir(root: &Path, base: &Path, pattern: &str, results: &mut Vec<String>) -
             .unwrap_or_default();
 
         if path.is_dir() {
-            if pattern.contains("**") {
-                walkdir(root, &path, pattern, results)?;
-            }
+            // Always recurse into directories - pattern may match files inside
+            let remaining_pattern = pattern.strip_prefix(&format!("{}/", name))
+                .or_else(|| pattern.strip_prefix(name))
+                .unwrap_or(pattern);
+            walkdir(root, &path, remaining_pattern, results)?;
         } else if matches_glob(&relative, pattern) {
             results.push(relative);
         }
