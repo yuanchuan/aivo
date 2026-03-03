@@ -20,19 +20,19 @@ Or download a binary from [GitHub Releases](https://github.com/yuanchuan/aivo/re
 ```bash
 # Use your GitHub Copilot subscription
 aivo keys add copilot
-aivo run claude
+aivo claude
 
 # Or add any other API key (OpenRouter, Vercel AI Gateway, etc.)
 aivo keys add
-aivo run claude
-aivo run claude --model moonshotai/kimi-k2.5
+aivo claude
+aivo claude --model moonshotai/kimi-k2.5
 ```
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `aivo run claude` | Run Claude Code |
+| `aivo claude` | Run Claude Code |
 | `aivo codex` | Run Codex |
 | `aivo gemini` | Run Gemini |
 | `aivo opencode` | Run OpenCode |
@@ -46,12 +46,12 @@ aivo run claude --model moonshotai/kimi-k2.5
 Flags pass through directly:
 
 ```bash
-aivo run claude --dangerously-skip-permissions
-aivo run claude --resume 16354407-050e-4447-a068-4db7922ff841
-aivo run claude --model moonshotai/kimi-k2.5
+aivo claude --dangerously-skip-permissions
+aivo claude --resume 16354407-050e-4447-a068-4db7922ff841
+aivo claude --model moonshotai/kimi-k2.5
 
-aivo run claude --key my-proxy       # use a specific saved key
-aivo run claude --env DEBUG=true     # inject extra env vars
+aivo claude --key my-proxy       # use a specific saved key
+aivo claude --env DEBUG=true     # inject extra env vars
 
 aivo chat --model openai/gpt-4o  # chat with any model
 
@@ -67,7 +67,7 @@ Use your existing GitHub Copilot subscription to run Claude Code — no separate
 
 ```bash
 aivo keys add copilot         # authenticate via GitHub device flow
-aivo run claude                   # run Claude Code with Copilot
+aivo claude                   # run Claude Code with Copilot
 aivo models                   # list available Copilot models
 aivo chat --model claude-sonnet-4.6
 ```
@@ -77,7 +77,7 @@ aivo chat --model claude-sonnet-4.6
 When routing Claude Code through Copilot, use `--smart` to enable optimizations:
 
 ```bash
-aivo run claude --smart
+aivo claude --smart
 ```
 
 **What it does:**
@@ -91,7 +91,7 @@ This only applies to Copilot connections.
 Add your key with `https://openrouter.ai/api/v1` as the base URL.
 
 ```bash
-aivo run claude --model claude-sonnet-4-6   # auto-converts model name
+aivo claude --model claude-sonnet-4-6   # auto-converts model name
 aivo chat --model openai/gpt-4o-mini
 ```
 
@@ -100,13 +100,13 @@ aivo chat --model openai/gpt-4o-mini
 Add your key with `https://ai-gateway.vercel.sh/v1` as the base URL.
 
 ```bash
-aivo run claude
+aivo claude
 aivo chat --model claude-sonnet-4-6
 ```
 
 ### Other providers
 
-Any Anthropic-compatible provider works with `aivo run claude`.
+Any Anthropic-compatible provider works with `aivo claude`.
 Any OpenAI-compatible provider works with `aivo chat` and `aivo codex`.
 
 Use the provider's base URL when adding a key — trailing `/v1` is handled automatically.
