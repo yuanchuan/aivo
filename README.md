@@ -20,19 +20,19 @@ Or download a binary from [GitHub Releases](https://github.com/yuanchuan/aivo/re
 ```bash
 # Use your GitHub Copilot subscription
 aivo keys add copilot
-aivo claude
+aivo run claude
 
 # Or add any other API key (OpenRouter, Vercel AI Gateway, etc.)
 aivo keys add
-aivo claude
-aivo claude --model moonshotai/kimi-k2.5
+aivo run claude
+aivo run claude --model moonshotai/kimi-k2.5
 ```
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `aivo claude` | Run Claude Code |
+| `aivo run claude` | Run Claude Code |
 | `aivo codex` | Run Codex |
 | `aivo gemini` | Run Gemini |
 | `aivo opencode` | Run OpenCode |
@@ -46,12 +46,12 @@ aivo claude --model moonshotai/kimi-k2.5
 Flags pass through directly:
 
 ```bash
-aivo claude --dangerously-skip-permissions
-aivo claude --resume 16354407-050e-4447-a068-4db7922ff841
-aivo claude --model moonshotai/kimi-k2.5
+aivo run claude --dangerously-skip-permissions
+aivo run claude --resume 16354407-050e-4447-a068-4db7922ff841
+aivo run claude --model moonshotai/kimi-k2.5
 
-aivo claude --key my-proxy       # use a specific saved key
-aivo claude --env DEBUG=true     # inject extra env vars
+aivo run claude --key my-proxy       # use a specific saved key
+aivo run claude --env DEBUG=true     # inject extra env vars
 
 aivo chat --model openai/gpt-4o  # chat with any model
 
@@ -67,31 +67,31 @@ Use your existing GitHub Copilot subscription to run Claude Code — no separate
 
 ```bash
 aivo keys add copilot         # authenticate via GitHub device flow
-aivo claude                   # run Claude Code with Copilot
+aivo run claude                   # run Claude Code with Copilot
 aivo models                   # list available Copilot models
 aivo chat --model claude-sonnet-4.6
 ```
 
-#### Optimization
+#### Smart Mode
 
-When routing Claude Code through Copilot, aivo performs **tool schema simplification** to reduce token usage:
-
-- Claude Code sends full JSON Schema definitions with verbose fields (`title`, `description`, `examples`, `default`, etc.)
-- aivo's CopilotRouter strips these verbose fields, keeping only essential ones (`type`, `properties`, `required`, `enum`)
-- This reduces tool definition size by ~30-50%, directly saving Copilot credits
-
-This optimization is automatic and only applies to Copilot connections. To disable it:
+When routing Claude Code through Copilot, use `--smart` to enable optimizations:
 
 ```bash
-aivo claude --no-optimize
+aivo run claude --smart
 ```
+
+**What it does:**
+- **Tool schema simplification**: Strips verbose JSON Schema fields (`title`, `description`, `examples`, `default`, etc.) keeping only essential ones (`type`, `properties`, `required`, `enum`)
+- Reduces tool definition size by ~35%, directly saving Copilot credits
+
+This only applies to Copilot connections.
 
 ### OpenRouter
 
 Add your key with `https://openrouter.ai/api/v1` as the base URL.
 
 ```bash
-aivo claude --model claude-sonnet-4-6   # auto-converts model name
+aivo run claude --model claude-sonnet-4-6   # auto-converts model name
 aivo chat --model openai/gpt-4o-mini
 ```
 
@@ -100,13 +100,13 @@ aivo chat --model openai/gpt-4o-mini
 Add your key with `https://ai-gateway.vercel.sh/v1` as the base URL.
 
 ```bash
-aivo claude
+aivo run claude
 aivo chat --model claude-sonnet-4-6
 ```
 
 ### Other providers
 
-Any Anthropic-compatible provider works with `aivo claude`.
+Any Anthropic-compatible provider works with `aivo run claude`.
 Any OpenAI-compatible provider works with `aivo chat` and `aivo codex`.
 
 Use the provider's base URL when adding a key — trailing `/v1` is handled automatically.
