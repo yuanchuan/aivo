@@ -541,7 +541,7 @@ impl Drop for ConfigLockGuard {
         // SAFETY: the handle stays valid for the guard lifetime; UnlockFile is safe to call
         // on a handle previously locked with LockFileEx.
         unsafe {
-            UnlockFile(self._file.as_raw_handle() as isize, 0, 0, u32::MAX, u32::MAX);
+            UnlockFile(self._file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX);
         }
     }
 }
@@ -628,7 +628,7 @@ impl SessionStore {
                 LockFileEx, LOCKFILE_EXCLUSIVE_LOCK,
             };
 
-            let handle = file.as_raw_handle() as isize;
+            let handle = file.as_raw_handle();
             let mut overlapped = unsafe { std::mem::zeroed() };
             // SAFETY: handle is valid; we own `file` for the guard's lifetime.
             let rc: BOOL = unsafe {

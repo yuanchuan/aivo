@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
+#[cfg(unix)]
 use tokio::signal;
 
 use crate::commands::normalize_base_url;
