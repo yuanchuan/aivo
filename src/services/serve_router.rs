@@ -300,7 +300,16 @@ async fn handle_responses(request: &str, state: &ServeState) -> Result<RouterRes
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let mut chat_body = convert_responses_to_chat_request(&body, &responses_router_config(state));
+    // Use `actual_model` to pin the model name to the raw user-supplied value.  The config's
+    // `target_protocol` is snapshotted here, before `handle_chat_body` runs the fallback loop;
+    // if the loop switches protocol, any protocol-based model-name transformation done by
+    // `convert_responses_to_chat_request` would have used the wrong protocol.  Setting
+    // `actual_model` causes `select_model_for_protocol` to return it verbatim, so the model
+    // field in `chat_body` is always the original string and `handle_chat_body` transforms it
+    // for the protocol that is actually selected.
+    let mut config = responses_router_config(state);
+    config.actual_model = Some(original_model.clone());
+    let mut chat_body = convert_responses_to_chat_request(&body, &config);
     chat_body["stream"] = json!(client_wants_stream);
     let chat_response = handle_chat_body(chat_body, state).await?;
 
@@ -404,6 +413,8 @@ async fn handle_chat_body(body: Value, state: &ServeState) -> Result<RouterRespo
 
         let status = match &response {
             RouterResponse::Buffered { status, .. } => *status,
+            // Streaming is only produced when the upstream returned 200 (see each handle_chat_* handler);
+            // a protocol mismatch (404/405/415) always results in a Buffered error response.
             RouterResponse::Streaming { .. } => 200,
         };
 
