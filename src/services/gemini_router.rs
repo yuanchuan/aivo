@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::services::copilot_auth::CopilotTokenManager;
 use crate::services::http_utils;
@@ -10,7 +11,7 @@ use crate::services::openai_anthropic_bridge::{
     OpenAIToAnthropicChatConfig, convert_anthropic_to_openai_chat_response,
     convert_openai_chat_to_anthropic_request,
 };
-use crate::services::provider_protocol::ProviderProtocol;
+use crate::services::provider_protocol::{ProviderProtocol, fallback_protocols, is_protocol_mismatch};
 
 #[derive(Clone)]
 pub struct GeminiRouterConfig {
@@ -32,9 +33,26 @@ pub struct GeminiRouter {
     config: GeminiRouterConfig,
 }
 
+fn protocol_to_u8(p: ProviderProtocol) -> u8 {
+    match p {
+        ProviderProtocol::Openai => 0,
+        ProviderProtocol::Anthropic => 1,
+        ProviderProtocol::Google => 2,
+    }
+}
+
+fn u8_to_protocol(v: u8) -> ProviderProtocol {
+    match v {
+        1 => ProviderProtocol::Anthropic,
+        2 => ProviderProtocol::Google,
+        _ => ProviderProtocol::Openai,
+    }
+}
+
 struct GeminiRouterState {
     config: Arc<GeminiRouterConfig>,
     client: Arc<reqwest::Client>,
+    active_protocol: Arc<AtomicU8>,
 }
 
 impl GeminiRouter {
@@ -47,6 +65,7 @@ impl GeminiRouter {
         let state = GeminiRouterState {
             config: Arc::new(self.config.clone()),
             client: Arc::new(http_utils::router_http_client()),
+            active_protocol: Arc::new(AtomicU8::new(protocol_to_u8(self.config.upstream_protocol))),
         };
         let handle = tokio::spawn(async move {
             http_utils::run_text_router(listener, Arc::new(state), handle_router_request).await
@@ -56,7 +75,7 @@ impl GeminiRouter {
 }
 
 async fn handle_router_request(request: String, state: Arc<GeminiRouterState>) -> String {
-    match handle_request(&request, &state.config, &state.client).await {
+    match handle_request(&request, &state.config, &state.client, &state.active_protocol).await {
         Ok(r) => r,
         Err(e) => http_utils::http_error_response(500, &e.to_string()),
     }
@@ -66,6 +85,7 @@ async fn handle_request(
     request: &str,
     config: &std::sync::Arc<GeminiRouterConfig>,
     client: &Arc<reqwest::Client>,
+    active_protocol: &Arc<AtomicU8>,
 ) -> Result<String> {
     let path = http_utils::extract_request_path(request);
 
@@ -83,10 +103,10 @@ async fn handle_request(
             let selected_model = select_model_for_protocol(
                 openai_req.get("model").and_then(|v| v.as_str()),
                 None,
-                config.upstream_protocol,
+                u8_to_protocol(active_protocol.load(Ordering::Relaxed)),
             );
             openai_req["model"] = serde_json::json!(selected_model);
-            let openai_response = forward_to_provider(openai_req, config, client).await?;
+            let openai_response = forward_to_provider(openai_req, config, client, active_protocol).await?;
             let openai_response = repair_tool_call_args(openai_response, &tool_schemas);
 
             if is_streaming {
@@ -106,65 +126,84 @@ async fn forward_to_provider(
     openai_req: Value,
     config: &std::sync::Arc<GeminiRouterConfig>,
     client: &Arc<reqwest::Client>,
+    active_protocol: &Arc<AtomicU8>,
 ) -> Result<Value> {
-    match config.upstream_protocol {
-        ProviderProtocol::Anthropic => {
-            let mut anthropic_req = convert_openai_chat_to_anthropic_request(
-                &openai_req,
-                &OpenAIToAnthropicChatConfig {
-                    default_model: "claude-sonnet-4-5",
-                },
-            );
-            anthropic_req["stream"] = serde_json::json!(false);
-            let target_url = http_utils::build_target_url(&config.target_base_url, "/v1/messages");
-            let response = client
-                .post(&target_url)
-                .header("Authorization", format!("Bearer {}", config.api_key))
-                .header("x-api-key", config.api_key.as_str())
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .json(&anthropic_req)
+    let current = u8_to_protocol(active_protocol.load(Ordering::Relaxed));
+    let candidates: Vec<ProviderProtocol> = std::iter::once(current)
+        .chain(fallback_protocols(current, &config.target_base_url))
+        .collect();
+
+    let mut last_err = String::from("No protocol candidates");
+    for (attempt, protocol) in candidates.into_iter().enumerate() {
+        let (status, body_text) = match protocol {
+            ProviderProtocol::Anthropic => {
+                let mut anthropic_req = convert_openai_chat_to_anthropic_request(
+                    &openai_req,
+                    &OpenAIToAnthropicChatConfig {
+                        default_model: "claude-sonnet-4-5",
+                    },
+                );
+                anthropic_req["stream"] = serde_json::json!(false);
+                let target_url = http_utils::build_target_url(&config.target_base_url, "/v1/messages");
+                let response = client
+                    .post(&target_url)
+                    .header("Authorization", format!("Bearer {}", config.api_key))
+                    .header("x-api-key", config.api_key.as_str())
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&anthropic_req)
+                    .send()
+                    .await?;
+                (response.status().as_u16(), response.text().await?)
+            }
+            _ => {
+                // OpenAI protocol
+                let target_url = http_utils::build_chat_completions_url(&config.target_base_url);
+                let response = http_utils::authorized_openai_post(
+                    client.as_ref(),
+                    &target_url,
+                    &config.api_key,
+                    config.copilot_token_manager.as_deref(),
+                )
+                .await?
+                .json(&openai_req)
                 .send()
                 .await?;
-
-            let status = response.status().as_u16();
-            let body_text = response.text().await?;
-            if status != 200 {
-                anyhow::bail!("Provider error {}: {}", status, body_text);
+                (response.status().as_u16(), response.text().await?)
             }
+        };
 
-            let anthropic_response: Value = serde_json::from_str(&body_text)?;
-            Ok(convert_anthropic_to_openai_chat_response(
-                &anthropic_response,
-                openai_req
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("gemini-2.5-pro"),
-            ))
+        if is_protocol_mismatch(status) {
+            last_err = format!("Protocol mismatch ({})", status);
+            continue;
         }
-        _ => {
-            let target_url = http_utils::build_chat_completions_url(&config.target_base_url);
-            let response = http_utils::authorized_openai_post(
-                client.as_ref(),
-                &target_url,
-                &config.api_key,
-                config.copilot_token_manager.as_deref(),
-            )
-            .await?
-            .json(&openai_req)
-            .send()
-            .await?;
 
-            let status = response.status().as_u16();
-            let body_text = response.text().await?;
+        if status != 200 {
+            anyhow::bail!("Provider error {}: {}", status, body_text);
+        }
 
-            if status != 200 {
-                anyhow::bail!("Provider error {}: {}", status, body_text);
+        // Success
+        if attempt > 0 {
+            active_protocol.store(protocol_to_u8(protocol), Ordering::Relaxed);
+            eprintln!("  • Protocol auto-switched to {}", protocol.as_str());
+        }
+
+        return match protocol {
+            ProviderProtocol::Anthropic => {
+                let anthropic_response: Value = serde_json::from_str(&body_text)?;
+                Ok(convert_anthropic_to_openai_chat_response(
+                    &anthropic_response,
+                    openai_req
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("gemini-2.5-pro"),
+                ))
             }
-
-            Ok(serde_json::from_str(&body_text)?)
-        }
+            _ => Ok(serde_json::from_str(&body_text)?),
+        };
     }
+
+    anyhow::bail!("All protocol candidates failed: {}", last_err)
 }
 
 /// Parses a Gemini API request path and extracts (model_name, is_streaming).
