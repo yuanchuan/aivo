@@ -165,13 +165,12 @@ async fn handle_anthropic_to_upstream(
     client: &reqwest::Client,
     active_protocol: &Arc<AtomicU8>,
 ) -> Result<RouterResponse> {
-    let mut passthrough_headers = http_utils::extract_passthrough_headers(request)?;
+    let passthrough_headers = http_utils::extract_passthrough_headers(request)?;
     let body_str = http_utils::extract_request_body(request)?;
 
     let body: Value = serde_json::from_str(body_str)?;
     let mut simplified = anthropic_to_openai(&body, config.requires_reasoning_content);
     cap_max_tokens_field(&mut simplified, config.max_tokens_cap);
-    prepare_gateway_model_metadata(&mut simplified, &mut passthrough_headers, config);
     let requested_stream = simplified
         .get("stream")
         .and_then(|v| v.as_bool())
@@ -185,8 +184,11 @@ async fn handle_anthropic_to_upstream(
     let mut last_response: Option<RouterResponse> = None;
 
     for (attempt, protocol) in candidates.drain(..).enumerate() {
-        // Apply model prefix for OpenAI protocol
         let mut req_body = simplified.clone();
+        let mut attempt_headers = passthrough_headers.clone();
+        prepare_gateway_model_metadata(&mut req_body, &mut attempt_headers, config, protocol);
+
+        // Apply model prefix for OpenAI protocol
         if protocol == ProviderProtocol::Openai
             && let Some(model) = req_body.get_mut("model")
             && let Some(model_str) = model.as_str()
@@ -210,7 +212,7 @@ async fn handle_anthropic_to_upstream(
                 let url = build_google_generate_content_url(&config.target_base_url, &model);
                 let response = client
                     .post(&url)
-                    .headers(passthrough_headers.clone())
+                    .headers(attempt_headers)
                     .header("x-goog-api-key", config.target_api_key.as_str())
                     .header("Content-Type", "application/json")
                     .header("User-Agent", "aivo-router/1.0")
@@ -257,7 +259,7 @@ async fn handle_anthropic_to_upstream(
                 let url = http_utils::build_chat_completions_url(&config.target_base_url);
                 let response = client
                     .post(&url)
-                    .headers(passthrough_headers.clone())
+                    .headers(attempt_headers)
                     .header("Authorization", format!("Bearer {}", config.target_api_key))
                     .header("Content-Type", "application/json")
                     .header("User-Agent", "aivo-router/1.0")
@@ -343,6 +345,7 @@ fn prepare_gateway_model_metadata(
     simplified: &mut Value,
     passthrough_headers: &mut HeaderMap,
     config: &OpenAIRouterConfig,
+    protocol: ProviderProtocol,
 ) {
     let requested_model = simplified
         .get("model")
@@ -352,11 +355,11 @@ fn prepare_gateway_model_metadata(
     let selected_model = if should_preserve_cross_protocol_model(
         &config.target_base_url,
         &requested_model,
-        config.target_protocol,
+        protocol,
     ) {
         requested_model.clone()
     } else {
-        select_model_for_protocol(Some(&requested_model), None, config.target_protocol)
+        select_model_for_protocol(Some(&requested_model), None, protocol)
     };
     simplified["model"] = Value::String(selected_model);
 
@@ -1051,7 +1054,7 @@ mod tests {
         let mut body = json!({"model": "claude-sonnet-4-6"});
         let mut headers = HeaderMap::new();
 
-        prepare_gateway_model_metadata(&mut body, &mut headers, &config);
+        prepare_gateway_model_metadata(&mut body, &mut headers, &config, config.target_protocol);
 
         assert_eq!(body["model"], "claude-sonnet-4-6");
         assert_eq!(
@@ -1073,7 +1076,7 @@ mod tests {
         let mut body = json!({"model": "claude-sonnet-4-6"});
         let mut headers = HeaderMap::new();
 
-        prepare_gateway_model_metadata(&mut body, &mut headers, &config);
+        prepare_gateway_model_metadata(&mut body, &mut headers, &config, config.target_protocol);
 
         assert_eq!(body["model"], "gpt-4o");
         assert!(headers.get("x-provider").is_none());

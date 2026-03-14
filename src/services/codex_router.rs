@@ -151,7 +151,12 @@ async fn handle_responses_api_via_chat(
         .and_then(|v| v.as_str())
         .unwrap_or("gpt-4o")
         .to_string();
-    let chat_body = convert_responses_to_chat_request(body, config);
+
+    // Create a config copy with the model pinned to avoid protocol-based transformation
+    // before we know which protocol the fallback loop will select.
+    let mut chat_config = (**config).clone();
+    chat_config.actual_model = Some(original_model.clone());
+    let chat_body = convert_responses_to_chat_request(body, &chat_config);
     let chat_response = match forward_openai_chat_request(&chat_body, config, client, false, active_protocol).await?
     {
         ForwardedChatResponse::Success(value) => value,
@@ -194,7 +199,7 @@ async fn handle_chat_completions_with_filter(
         let selected_model = select_model_for_protocol(
             body.get("model").and_then(|v| v.as_str()),
             config.actual_model.as_deref(),
-            config.target_protocol,
+            ProviderProtocol::from_u8(active_protocol.load(Ordering::Relaxed)),
         );
         body["model"] = Value::String(selected_model);
         transform_model(
