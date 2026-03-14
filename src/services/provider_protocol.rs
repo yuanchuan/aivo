@@ -51,12 +51,14 @@ pub fn detect_provider_protocol(base_url: &str) -> ProviderProtocol {
 
 /// Returns true if the HTTP status suggests the endpoint path doesn't exist
 /// (wrong protocol), as opposed to auth/model/rate errors.
+#[allow(dead_code)]
 pub fn is_protocol_mismatch(status: u16) -> bool {
     matches!(status, 404 | 405 | 415)
 }
 
 /// Returns fallback protocol candidates to try after `current` fails.
 /// Excludes Google unless the URL suggests a Google endpoint.
+#[allow(dead_code)]
 pub fn fallback_protocols(current: ProviderProtocol, base_url: &str) -> Vec<ProviderProtocol> {
     let include_google = is_google_endpoint(base_url);
     [ProviderProtocol::Openai, ProviderProtocol::Anthropic, ProviderProtocol::Google]

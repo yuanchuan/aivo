@@ -80,15 +80,7 @@ pub enum ClaudeProviderProtocol {
     Google,
 }
 
-impl ClaudeProviderProtocol {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-            Self::Openai => "openai",
-            Self::Google => "google",
-        }
-    }
-}
+impl ClaudeProviderProtocol {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -98,15 +90,7 @@ pub enum GeminiProviderProtocol {
     Anthropic,
 }
 
-impl GeminiProviderProtocol {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Google => "google",
-            Self::Openai => "openai",
-            Self::Anthropic => "anthropic",
-        }
-    }
-}
+impl GeminiProviderProtocol {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1327,16 +1311,6 @@ impl SessionStore {
         }
     }
 
-    /// Persists the learned Claude protocol for an existing key.
-    pub async fn set_key_claude_protocol(
-        &self,
-        id: &str,
-        claude_protocol: Option<ClaudeProviderProtocol>,
-    ) -> Result<bool> {
-        self.update_key_field(id, |entry| entry.claude_protocol = claude_protocol)
-            .await
-    }
-
     pub async fn set_key_gemini_protocol(
         &self,
         id: &str,
@@ -2229,28 +2203,6 @@ mod tests {
         assert!(!id.contains('l'));
         assert!(!id.contains('o'));
         assert!(id.chars().all(|c| KEY_ID_ALPHABET.contains(&(c as u8))));
-    }
-
-    #[tokio::test]
-    async fn test_set_key_claude_protocol_updates_existing_key() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("config.json");
-        let store = SessionStore::with_path(config_path);
-
-        let id = store
-            .add_key_with_protocol("test", "http://localhost", None, "sk-test")
-            .await
-            .unwrap();
-
-        assert!(
-            store
-                .set_key_claude_protocol(&id, Some(ClaudeProviderProtocol::Openai))
-                .await
-                .unwrap()
-        );
-
-        let key = store.get_key_by_id(&id).await.unwrap().unwrap();
-        assert_eq!(key.claude_protocol, Some(ClaudeProviderProtocol::Openai));
     }
 
     #[tokio::test]
