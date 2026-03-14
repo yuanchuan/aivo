@@ -11,7 +11,7 @@ use crate::services::openai_gemini_bridge::{
     convert_gemini_to_openai_chat_response, convert_openai_chat_to_gemini_request,
     openai_chat_model,
 };
-use crate::services::provider_protocol::ProviderProtocol;
+use crate::services::provider_protocol::{ProviderProtocol, fallback_protocols, is_protocol_mismatch};
 /**
  * Built-in Codex Router service
  *
@@ -29,9 +29,25 @@ use crate::services::provider_protocol::ProviderProtocol;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn protocol_to_u8(p: ProviderProtocol) -> u8 {
+    match p {
+        ProviderProtocol::Openai => 0,
+        ProviderProtocol::Anthropic => 1,
+        ProviderProtocol::Google => 2,
+    }
+}
+
+fn u8_to_protocol(v: u8) -> ProviderProtocol {
+    match v {
+        1 => ProviderProtocol::Anthropic,
+        2 => ProviderProtocol::Google,
+        _ => ProviderProtocol::Openai,
+    }
+}
 
 #[derive(Clone)]
 pub struct CodexRouterConfig {
@@ -65,6 +81,7 @@ enum ForwardedChatResponse {
 struct CodexRouterState {
     config: Arc<CodexRouterConfig>,
     client: Arc<reqwest::Client>,
+    active_protocol: Arc<AtomicU8>,
 }
 
 impl CodexRouter {
@@ -79,6 +96,7 @@ impl CodexRouter {
         let state = CodexRouterState {
             config: Arc::new(self.config.clone()),
             client: Arc::new(http_utils::router_http_client()),
+            active_protocol: Arc::new(AtomicU8::new(protocol_to_u8(self.config.target_protocol))),
         };
         let handle = tokio::spawn(async move {
             http_utils::run_text_router(listener, Arc::new(state), handle_router_request).await
@@ -96,7 +114,7 @@ async fn handle_router_request(request: String, state: Arc<CodexRouterState>) ->
     );
 
     if is_api_path {
-        match handle_api_request(&path, &request, &state.config, state.client.as_ref()).await {
+        match handle_api_request(&path, &request, &state.config, state.client.as_ref(), &state.active_protocol).await {
             Ok(r) => r,
             Err(_) => http_utils::http_error_response(500, "Internal Server Error"),
         }
@@ -116,14 +134,15 @@ async fn handle_api_request(
     request: &str,
     config: &Arc<CodexRouterConfig>,
     client: &reqwest::Client,
+    active_protocol: &Arc<AtomicU8>,
 ) -> Result<String> {
     let body_str = http_utils::extract_request_body(request)?;
     let body: Value = serde_json::from_str(body_str)?;
 
     if is_responses_api_format(&body) {
-        handle_responses_api_via_chat(path, &body, config, client).await
+        handle_responses_api_via_chat(path, &body, config, client, active_protocol).await
     } else {
-        handle_chat_completions_with_filter(path, &body, config, client).await
+        handle_chat_completions_with_filter(path, &body, config, client, active_protocol).await
     }
 }
 
@@ -139,6 +158,7 @@ async fn handle_responses_api_via_chat(
     body: &Value,
     config: &Arc<CodexRouterConfig>,
     client: &reqwest::Client,
+    active_protocol: &Arc<AtomicU8>,
 ) -> Result<String> {
     // Extract original model before conversion
     let original_model = body
@@ -147,7 +167,7 @@ async fn handle_responses_api_via_chat(
         .unwrap_or("gpt-4o")
         .to_string();
     let chat_body = convert_responses_to_chat_request(body, config);
-    let chat_response = match forward_openai_chat_request(&chat_body, config, client, false).await?
+    let chat_response = match forward_openai_chat_request(&chat_body, config, client, false, active_protocol).await?
     {
         ForwardedChatResponse::Success(value) => value,
         ForwardedChatResponse::HttpError { status, body } => {
@@ -172,6 +192,7 @@ async fn handle_chat_completions_with_filter(
     body: &Value,
     config: &Arc<CodexRouterConfig>,
     client: &reqwest::Client,
+    active_protocol: &Arc<AtomicU8>,
 ) -> Result<String> {
     let mut body = body.clone();
     let requested_stream = body
@@ -198,7 +219,7 @@ async fn handle_chat_completions_with_filter(
         );
     }
 
-    if config.target_protocol == ProviderProtocol::Openai {
+    if u8_to_protocol(active_protocol.load(Ordering::Relaxed)) == ProviderProtocol::Openai {
         let target_url = build_target_url(&config.target_base_url, path);
         let response = http_utils::authorized_openai_post(
             client,
@@ -215,7 +236,7 @@ async fn handle_chat_completions_with_filter(
     }
 
     let chat_response =
-        match forward_openai_chat_request(&body, config, client, requested_stream).await? {
+        match forward_openai_chat_request(&body, config, client, requested_stream, active_protocol).await? {
             ForwardedChatResponse::Success(value) => value,
             ForwardedChatResponse::HttpError { status, body } => {
                 return Ok(http_utils::http_json_response(status, &body));
@@ -268,103 +289,137 @@ async fn forward_openai_chat_request(
     config: &Arc<CodexRouterConfig>,
     client: &reqwest::Client,
     force_non_streaming: bool,
+    active_protocol: &Arc<AtomicU8>,
 ) -> Result<ForwardedChatResponse> {
-    match config.target_protocol {
-        ProviderProtocol::Openai => {
-            let target_url = build_target_url(&config.target_base_url, "/v1/chat/completions");
-            let response = http_utils::authorized_openai_post(
-                client,
-                &target_url,
-                &config.api_key,
-                config.copilot_token_manager.as_deref(),
-            )
-            .await?
-            .json(body)
-            .send()
-            .await?;
+    let current = u8_to_protocol(active_protocol.load(Ordering::Relaxed));
+    let candidates: Vec<ProviderProtocol> = std::iter::once(current)
+        .chain(fallback_protocols(current, &config.target_base_url))
+        .collect();
 
-            let status_code = response.status().as_u16();
-            let response_text = response.text().await?;
-            if status_code != 200 {
-                return Ok(ForwardedChatResponse::HttpError {
-                    status: status_code,
-                    body: response_text,
-                });
-            }
-            Ok(ForwardedChatResponse::Success(parse_provider_response(
-                &response_text,
-            )?))
-        }
-        ProviderProtocol::Anthropic => {
-            let mut anthropic_body = convert_openai_chat_to_anthropic_request(
-                body,
-                &OpenAIToAnthropicChatConfig {
-                    default_model: "claude-sonnet-4-5",
-                },
-            );
-            if force_non_streaming {
-                anthropic_body["stream"] = json!(false);
-            }
-            let target_url = build_target_url(&config.target_base_url, "/v1/messages");
-            let response = client
-                .post(&target_url)
-                .header("Authorization", format!("Bearer {}", config.api_key))
-                .header("x-api-key", config.api_key.as_str())
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .json(&anthropic_body)
+    let mut last_status = 0u16;
+    let mut last_body = String::new();
+
+    for (attempt, protocol) in candidates.iter().enumerate() {
+        let (status_code, response_text, result) = match protocol {
+            ProviderProtocol::Openai => {
+                let target_url =
+                    build_target_url(&config.target_base_url, "/v1/chat/completions");
+                let response = http_utils::authorized_openai_post(
+                    client,
+                    &target_url,
+                    &config.api_key,
+                    config.copilot_token_manager.as_deref(),
+                )
+                .await?
+                .json(body)
                 .send()
                 .await?;
 
-            let status_code = response.status().as_u16();
-            let response_text = response.text().await?;
-            if status_code != 200 {
-                return Ok(ForwardedChatResponse::HttpError {
-                    status: status_code,
-                    body: response_text,
-                });
+                let status_code = response.status().as_u16();
+                let response_text = response.text().await?;
+                let result = if status_code == 200 {
+                    Some(ForwardedChatResponse::Success(parse_provider_response(
+                        &response_text,
+                    )?))
+                } else {
+                    None
+                };
+                (status_code, response_text, result)
             }
-            let anthropic_response: Value = serde_json::from_str(&response_text)?;
-            Ok(ForwardedChatResponse::Success(
-                convert_anthropic_to_openai_chat_response(
-                    &anthropic_response,
-                    body.get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("gpt-4o"),
-                ),
-            ))
-        }
-        ProviderProtocol::Google => {
-            let google_body = convert_openai_chat_to_gemini_request(
-                body,
-                &OpenAIToGeminiConfig {
-                    default_model: "gemini-2.5-pro",
-                },
-            );
-            let model = openai_chat_model(body, "gemini-2.5-pro");
-            let target_url = build_google_generate_content_url(&config.target_base_url, &model);
-            let response = client
-                .post(&target_url)
-                .header("x-goog-api-key", config.api_key.as_str())
-                .header("Content-Type", "application/json")
-                .json(&google_body)
-                .send()
-                .await?;
+            ProviderProtocol::Anthropic => {
+                let mut anthropic_body = convert_openai_chat_to_anthropic_request(
+                    body,
+                    &OpenAIToAnthropicChatConfig {
+                        default_model: "claude-sonnet-4-5",
+                    },
+                );
+                if force_non_streaming {
+                    anthropic_body["stream"] = json!(false);
+                }
+                let target_url = build_target_url(&config.target_base_url, "/v1/messages");
+                let response = client
+                    .post(&target_url)
+                    .header("Authorization", format!("Bearer {}", config.api_key))
+                    .header("x-api-key", config.api_key.as_str())
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&anthropic_body)
+                    .send()
+                    .await?;
 
-            let status_code = response.status().as_u16();
-            let response_text = response.text().await?;
-            if status_code != 200 {
-                return Ok(ForwardedChatResponse::HttpError {
-                    status: status_code,
-                    body: response_text,
-                });
+                let status_code = response.status().as_u16();
+                let response_text = response.text().await?;
+                let result = if status_code == 200 {
+                    let anthropic_response: Value = serde_json::from_str(&response_text)?;
+                    Some(ForwardedChatResponse::Success(
+                        convert_anthropic_to_openai_chat_response(
+                            &anthropic_response,
+                            body.get("model")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("gpt-4o"),
+                        ),
+                    ))
+                } else {
+                    None
+                };
+                (status_code, response_text, result)
             }
-            let google_response: Value = serde_json::from_str(&response_text)?;
-            Ok(ForwardedChatResponse::Success(
-                convert_gemini_to_openai_chat_response(&google_response, &model),
-            ))
+            ProviderProtocol::Google => {
+                let google_body = convert_openai_chat_to_gemini_request(
+                    body,
+                    &OpenAIToGeminiConfig {
+                        default_model: "gemini-2.5-pro",
+                    },
+                );
+                let model = openai_chat_model(body, "gemini-2.5-pro");
+                let target_url =
+                    build_google_generate_content_url(&config.target_base_url, &model);
+                let response = client
+                    .post(&target_url)
+                    .header("x-goog-api-key", config.api_key.as_str())
+                    .header("Content-Type", "application/json")
+                    .json(&google_body)
+                    .send()
+                    .await?;
+
+                let status_code = response.status().as_u16();
+                let response_text = response.text().await?;
+                let result = if status_code == 200 {
+                    let google_response: Value = serde_json::from_str(&response_text)?;
+                    Some(ForwardedChatResponse::Success(
+                        convert_gemini_to_openai_chat_response(&google_response, &model),
+                    ))
+                } else {
+                    None
+                };
+                (status_code, response_text, result)
+            }
+        };
+
+        if let Some(success) = result {
+            if attempt > 0 {
+                active_protocol.store(protocol_to_u8(*protocol), Ordering::Relaxed);
+                eprintln!("  • Protocol auto-switched to {}", protocol.as_str());
+            }
+            return Ok(success);
         }
+
+        if is_protocol_mismatch(status_code) {
+            last_status = status_code;
+            last_body = response_text;
+            continue;
+        }
+
+        return Ok(ForwardedChatResponse::HttpError {
+            status: status_code,
+            body: response_text,
+        });
     }
+
+    Ok(ForwardedChatResponse::HttpError {
+        status: last_status,
+        body: last_body,
+    })
 }
 
 // =============================================================================
