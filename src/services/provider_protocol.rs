@@ -22,6 +22,22 @@ impl ProviderProtocol {
             _ => None,
         }
     }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Openai => 0,
+            Self::Anthropic => 1,
+            Self::Google => 2,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Anthropic,
+            2 => Self::Google,
+            _ => Self::Openai,
+        }
+    }
 }
 
 pub fn normalize_protocol_base(base_url: &str) -> &str {

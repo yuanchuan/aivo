@@ -33,21 +33,6 @@ pub struct GeminiRouter {
     config: GeminiRouterConfig,
 }
 
-fn protocol_to_u8(p: ProviderProtocol) -> u8 {
-    match p {
-        ProviderProtocol::Openai => 0,
-        ProviderProtocol::Anthropic => 1,
-        ProviderProtocol::Google => 2,
-    }
-}
-
-fn u8_to_protocol(v: u8) -> ProviderProtocol {
-    match v {
-        1 => ProviderProtocol::Anthropic,
-        2 => ProviderProtocol::Google,
-        _ => ProviderProtocol::Openai,
-    }
-}
 
 struct GeminiRouterState {
     config: Arc<GeminiRouterConfig>,
@@ -65,7 +50,7 @@ impl GeminiRouter {
         let state = GeminiRouterState {
             config: Arc::new(self.config.clone()),
             client: Arc::new(http_utils::router_http_client()),
-            active_protocol: Arc::new(AtomicU8::new(protocol_to_u8(self.config.upstream_protocol))),
+            active_protocol: Arc::new(AtomicU8::new(self.config.upstream_protocol.to_u8())),
         };
         let handle = tokio::spawn(async move {
             http_utils::run_text_router(listener, Arc::new(state), handle_router_request).await
@@ -124,7 +109,7 @@ async fn forward_to_provider(
     client: &Arc<reqwest::Client>,
     active_protocol: &Arc<AtomicU8>,
 ) -> Result<Value> {
-    let current = u8_to_protocol(active_protocol.load(Ordering::Relaxed));
+    let current = ProviderProtocol::from_u8(active_protocol.load(Ordering::Relaxed));
     let candidates: Vec<ProviderProtocol> = std::iter::once(current)
         .chain(fallback_protocols(current, &config.target_base_url))
         .collect();
@@ -189,7 +174,7 @@ async fn forward_to_provider(
 
         // Success
         if attempt > 0 {
-            active_protocol.store(protocol_to_u8(protocol), Ordering::Relaxed);
+            active_protocol.store(protocol.to_u8(), Ordering::Relaxed);
             eprintln!("  • Protocol auto-switched to {}", protocol.as_str());
         }
 

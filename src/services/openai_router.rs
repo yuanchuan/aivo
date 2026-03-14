@@ -81,7 +81,7 @@ impl OpenAIRouter {
         let state = OpenAIRouterState {
             config: Arc::new(self.config.clone()),
             client: router_http_client(),
-            active_protocol: Arc::new(AtomicU8::new(protocol_to_u8(self.config.target_protocol))),
+            active_protocol: Arc::new(AtomicU8::new(self.config.target_protocol.to_u8())),
         };
         let handle = tokio::spawn(async move { run_router(listener, state).await });
         Ok((port, handle))
@@ -150,22 +150,6 @@ async fn write_router_response(
     Ok(())
 }
 
-fn protocol_to_u8(p: ProviderProtocol) -> u8 {
-    match p {
-        ProviderProtocol::Openai => 0,
-        ProviderProtocol::Anthropic => 1,
-        ProviderProtocol::Google => 2,
-    }
-}
-
-fn u8_to_protocol(v: u8) -> ProviderProtocol {
-    match v {
-        1 => ProviderProtocol::Anthropic,
-        2 => ProviderProtocol::Google,
-        _ => ProviderProtocol::Openai,
-    }
-}
-
 /// Apply an optional prefix to a model name, skipping if the prefix is already present.
 fn apply_model_prefix(model: &str, prefix: Option<&str>) -> String {
     match prefix {
@@ -193,7 +177,7 @@ async fn handle_anthropic_to_upstream(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let current = u8_to_protocol(active_protocol.load(Ordering::Relaxed));
+    let current = ProviderProtocol::from_u8(active_protocol.load(Ordering::Relaxed));
     let mut candidates = std::iter::once(current)
         .chain(fallback_protocols(current, &config.target_base_url))
         .collect::<Vec<_>>();
@@ -319,7 +303,7 @@ async fn handle_anthropic_to_upstream(
         if let Some(r) = response_opt {
             // Success (not a protocol mismatch)
             if attempt > 0 {
-                active_protocol.store(protocol_to_u8(protocol), Ordering::Relaxed);
+                active_protocol.store(protocol.to_u8(), Ordering::Relaxed);
                 eprintln!("  • Protocol auto-switched to {}", protocol.as_str());
             }
             return Ok(r);

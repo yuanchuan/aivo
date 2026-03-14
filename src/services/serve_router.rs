@@ -152,21 +152,6 @@ enum ResponsesOutputItem {
 
 static RESPONSES_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn protocol_to_u8(p: ProviderProtocol) -> u8 {
-    match p {
-        ProviderProtocol::Openai => 0,
-        ProviderProtocol::Anthropic => 1,
-        ProviderProtocol::Google => 2,
-    }
-}
-
-fn u8_to_protocol(v: u8) -> ProviderProtocol {
-    match v {
-        1 => ProviderProtocol::Anthropic,
-        2 => ProviderProtocol::Google,
-        _ => ProviderProtocol::Openai,
-    }
-}
 
 impl ServeRouter {
     pub fn new(config: ServeRouterConfig, key: ApiKey) -> Self {
@@ -193,7 +178,7 @@ impl ServeRouter {
             client: router_http_client(),
             key: self.key,
             copilot_tokens,
-            active_protocol: Arc::new(AtomicU8::new(protocol_to_u8(initial_protocol))),
+            active_protocol: Arc::new(AtomicU8::new(initial_protocol.to_u8())),
         });
 
         Ok(tokio::spawn(run_accept_loop(listener, state)))
@@ -378,7 +363,7 @@ async fn handle_chat_body(body: Value, state: &ServeState) -> Result<RouterRespo
     // Skip fallback for copilot/openrouter — these have fixed protocols
     if state.config.is_copilot || state.config.is_openrouter {
         let mut body = body;
-        return match u8_to_protocol(state.active_protocol.load(Ordering::Relaxed)) {
+        return match ProviderProtocol::from_u8(state.active_protocol.load(Ordering::Relaxed)) {
             ProviderProtocol::Anthropic => {
                 handle_chat_anthropic(&body, client_wants_stream, state).await
             }
@@ -391,7 +376,7 @@ async fn handle_chat_body(body: Value, state: &ServeState) -> Result<RouterRespo
         };
     }
 
-    let current = u8_to_protocol(state.active_protocol.load(Ordering::Relaxed));
+    let current = ProviderProtocol::from_u8(state.active_protocol.load(Ordering::Relaxed));
     let candidates: Vec<ProviderProtocol> = std::iter::once(current)
         .chain(fallback_protocols(current, &state.config.upstream_base_url))
         .collect();
@@ -427,7 +412,7 @@ async fn handle_chat_body(body: Value, state: &ServeState) -> Result<RouterRespo
         if attempt > 0 {
             state
                 .active_protocol
-                .store(protocol_to_u8(protocol), Ordering::Relaxed);
+                .store(protocol.to_u8(), Ordering::Relaxed);
             eprintln!("  \u{2022} Protocol auto-switched to {}", protocol.as_str());
         }
         return Ok(response);
@@ -444,7 +429,7 @@ fn responses_router_config(state: &ServeState) -> CodexRouterConfig {
     CodexRouterConfig {
         target_base_url: state.config.upstream_base_url.clone(),
         api_key: state.config.upstream_api_key.clone(),
-        target_protocol: u8_to_protocol(state.active_protocol.load(Ordering::Relaxed)),
+        target_protocol: ProviderProtocol::from_u8(state.active_protocol.load(Ordering::Relaxed)),
         copilot_token_manager: state.copilot_tokens.clone(),
         model_prefix: None,
         requires_reasoning_content: false,

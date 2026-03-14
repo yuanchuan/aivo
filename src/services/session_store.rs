@@ -80,8 +80,6 @@ pub enum ClaudeProviderProtocol {
     Google,
 }
 
-impl ClaudeProviderProtocol {}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum GeminiProviderProtocol {
@@ -89,8 +87,6 @@ pub enum GeminiProviderProtocol {
     Openai,
     Anthropic,
 }
-
-impl GeminiProviderProtocol {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

@@ -33,21 +33,6 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn protocol_to_u8(p: ProviderProtocol) -> u8 {
-    match p {
-        ProviderProtocol::Openai => 0,
-        ProviderProtocol::Anthropic => 1,
-        ProviderProtocol::Google => 2,
-    }
-}
-
-fn u8_to_protocol(v: u8) -> ProviderProtocol {
-    match v {
-        1 => ProviderProtocol::Anthropic,
-        2 => ProviderProtocol::Google,
-        _ => ProviderProtocol::Openai,
-    }
-}
 
 #[derive(Clone)]
 pub struct CodexRouterConfig {
@@ -96,7 +81,7 @@ impl CodexRouter {
         let state = CodexRouterState {
             config: Arc::new(self.config.clone()),
             client: Arc::new(http_utils::router_http_client()),
-            active_protocol: Arc::new(AtomicU8::new(protocol_to_u8(self.config.target_protocol))),
+            active_protocol: Arc::new(AtomicU8::new(self.config.target_protocol.to_u8())),
         };
         let handle = tokio::spawn(async move {
             http_utils::run_text_router(listener, Arc::new(state), handle_router_request).await
@@ -275,7 +260,7 @@ async fn forward_openai_chat_request(
     force_non_streaming: bool,
     active_protocol: &Arc<AtomicU8>,
 ) -> Result<ForwardedChatResponse> {
-    let current = u8_to_protocol(active_protocol.load(Ordering::Relaxed));
+    let current = ProviderProtocol::from_u8(active_protocol.load(Ordering::Relaxed));
     let candidates: Vec<ProviderProtocol> = std::iter::once(current)
         .chain(fallback_protocols(current, &config.target_base_url))
         .collect();
@@ -382,7 +367,7 @@ async fn forward_openai_chat_request(
 
         if let Some(success) = result {
             if attempt > 0 {
-                active_protocol.store(protocol_to_u8(*protocol), Ordering::Relaxed);
+                active_protocol.store(protocol.to_u8(), Ordering::Relaxed);
                 eprintln!("  • Protocol auto-switched to {}", protocol.as_str());
             }
             return Ok(success);
