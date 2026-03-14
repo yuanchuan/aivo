@@ -6,16 +6,13 @@ use reqwest::Client;
 use serde_json::json;
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::time::Duration;
 use tokio::process::Command;
 #[cfg(unix)]
 use tokio::signal;
 
-use crate::commands::normalize_base_url;
 use crate::errors::{CLIError, ErrorCategory};
 use crate::services::codex_model_map::map_model_for_codex_cli;
 use crate::services::environment_injector::EnvironmentInjector;
-use crate::services::http_utils;
 use crate::services::models_cache::ModelsCache;
 use crate::services::provider_profile::{
     is_copilot_base, is_direct_openai_base, provider_profile_for_base_url,
@@ -85,13 +82,6 @@ pub struct AILauncher {
     session_store: SessionStore,
     env_injector: EnvironmentInjector,
     cache: ModelsCache,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClaudeProtocolProbeOutcome {
-    Supported,
-    Unsupported,
-    Inconclusive,
 }
 
 impl AILauncher {
@@ -319,150 +309,46 @@ impl AILauncher {
     async fn resolve_claude_protocol(
         &self,
         mut key: ApiKey,
-        persist: bool,
-        model: Option<&str>,
+        _persist: bool,
+        _model: Option<&str>,
     ) -> Result<ApiKey> {
         let profile = provider_profile_for_base_url(&key.base_url);
         if profile.serve_flags.is_copilot || profile.serve_flags.is_openrouter {
             return Ok(key);
         }
-
-        let preferred = preferred_claude_protocol(&key.base_url);
-        let first = key.claude_protocol.unwrap_or(preferred);
-        let candidates = ordered_claude_protocol_candidates(first, preferred);
-
-        for (index, candidate) in candidates.into_iter().enumerate() {
-            match probe_claude_protocol(&key, candidate, model).await {
-                ClaudeProtocolProbeOutcome::Supported => {
-                    if index > 0 {
-                        eprintln!(
-                            "  {} Claude protocol auto-switched to {}",
-                            crate::style::bullet_symbol(),
-                            candidate.as_str()
-                        );
-                    }
-                    if key.claude_protocol != Some(candidate) {
-                        key.claude_protocol = Some(candidate);
-                        if persist {
-                            let _ = self
-                                .session_store
-                                .set_key_claude_protocol(&key.id, Some(candidate))
-                                .await?;
-                        }
-                    }
-                    return Ok(key);
-                }
-                ClaudeProtocolProbeOutcome::Inconclusive => {
-                    key.claude_protocol = Some(candidate);
-                    return Ok(key);
-                }
-                ClaudeProtocolProbeOutcome::Unsupported => {}
-            }
+        if key.claude_protocol.is_none() {
+            key.claude_protocol = Some(preferred_claude_protocol(&key.base_url));
         }
-
-        key.claude_protocol = Some(first);
         Ok(key)
     }
 
-    async fn resolve_codex_mode(&self, mut key: ApiKey, persist: bool) -> Result<ApiKey> {
+    async fn resolve_codex_mode(&self, mut key: ApiKey, _persist: bool) -> Result<ApiKey> {
         if is_copilot_base(&key.base_url) {
             return Ok(key);
         }
-
-        let preferred = preferred_codex_mode(&key.base_url);
-        let first = key.codex_mode.unwrap_or(preferred);
-        let (mode, decisive) = match first {
-            OpenAICompatibilityMode::Direct => match probe_openai_responses_compatibility(&key)
-                .await
-            {
-                ClaudeProtocolProbeOutcome::Supported => (OpenAICompatibilityMode::Direct, true),
-                ClaudeProtocolProbeOutcome::Unsupported => (OpenAICompatibilityMode::Router, true),
-                ClaudeProtocolProbeOutcome::Inconclusive => (first, false),
-            },
-            OpenAICompatibilityMode::Router => (OpenAICompatibilityMode::Router, false),
-        };
-
-        if key.codex_mode != Some(mode) {
-            key.codex_mode = Some(mode);
-            if decisive && persist {
-                let _ = self
-                    .session_store
-                    .set_key_codex_mode(&key.id, Some(mode))
-                    .await?;
-            }
+        if key.codex_mode.is_none() {
+            key.codex_mode = Some(preferred_codex_mode(&key.base_url));
         }
-
         Ok(key)
     }
 
-    async fn resolve_gemini_protocol(&self, mut key: ApiKey, persist: bool) -> Result<ApiKey> {
+    async fn resolve_gemini_protocol(&self, mut key: ApiKey, _persist: bool) -> Result<ApiKey> {
         if is_copilot_base(&key.base_url) {
             return Ok(key);
         }
-
-        let preferred = preferred_gemini_protocol(&key.base_url);
-        let first = key.gemini_protocol.unwrap_or(preferred);
-        let candidates = ordered_gemini_protocol_candidates(first, preferred);
-
-        for (index, candidate) in candidates.into_iter().enumerate() {
-            match probe_gemini_protocol(&key, candidate).await {
-                ClaudeProtocolProbeOutcome::Supported => {
-                    if index > 0 {
-                        eprintln!(
-                            "  {} Gemini protocol auto-switched to {}",
-                            crate::style::bullet_symbol(),
-                            candidate.as_str()
-                        );
-                    }
-                    if key.gemini_protocol != Some(candidate) {
-                        key.gemini_protocol = Some(candidate);
-                        if persist {
-                            let _ = self
-                                .session_store
-                                .set_key_gemini_protocol(&key.id, Some(candidate))
-                                .await?;
-                        }
-                    }
-                    return Ok(key);
-                }
-                ClaudeProtocolProbeOutcome::Inconclusive => {
-                    key.gemini_protocol = Some(candidate);
-                    return Ok(key);
-                }
-                ClaudeProtocolProbeOutcome::Unsupported => {}
-            }
+        if key.gemini_protocol.is_none() {
+            key.gemini_protocol = Some(preferred_gemini_protocol(&key.base_url));
         }
-
-        key.gemini_protocol = Some(first);
         Ok(key)
     }
 
-    async fn resolve_opencode_mode(&self, mut key: ApiKey, persist: bool) -> Result<ApiKey> {
+    async fn resolve_opencode_mode(&self, mut key: ApiKey, _persist: bool) -> Result<ApiKey> {
         if is_copilot_base(&key.base_url) {
             return Ok(key);
         }
-
-        let preferred = preferred_opencode_mode(&key.base_url);
-        let first = key.opencode_mode.unwrap_or(preferred);
-        let (mode, decisive) = match first {
-            OpenAICompatibilityMode::Direct => match probe_openai_chat_compatibility(&key).await {
-                ClaudeProtocolProbeOutcome::Supported => (OpenAICompatibilityMode::Direct, true),
-                ClaudeProtocolProbeOutcome::Unsupported => (OpenAICompatibilityMode::Router, true),
-                ClaudeProtocolProbeOutcome::Inconclusive => (first, false),
-            },
-            OpenAICompatibilityMode::Router => (OpenAICompatibilityMode::Router, false),
-        };
-
-        if key.opencode_mode != Some(mode) {
-            key.opencode_mode = Some(mode);
-            if decisive && persist {
-                let _ = self
-                    .session_store
-                    .set_key_opencode_mode(&key.id, Some(mode))
-                    .await?;
-            }
+        if key.opencode_mode.is_none() {
+            key.opencode_mode = Some(preferred_opencode_mode(&key.base_url));
         }
-
         Ok(key)
     }
 
@@ -642,256 +528,6 @@ fn preferred_opencode_mode(base_url: &str) -> OpenAICompatibilityMode {
         OpenAICompatibilityMode::Direct
     } else {
         OpenAICompatibilityMode::Router
-    }
-}
-
-fn ordered_claude_protocol_candidates(
-    first: ClaudeProviderProtocol,
-    preferred: ClaudeProviderProtocol,
-) -> Vec<ClaudeProviderProtocol> {
-    let mut candidates = vec![first];
-    // Only include Google as a fallback when the URL looks like a Google endpoint.
-    // A generic GET probe to an unknown path can return 401 on any server, causing
-    // false positives when Google is tried as a last resort.
-    let pool = if preferred == ClaudeProviderProtocol::Google {
-        vec![
-            preferred,
-            ClaudeProviderProtocol::Openai,
-            ClaudeProviderProtocol::Anthropic,
-            ClaudeProviderProtocol::Google,
-        ]
-    } else {
-        vec![
-            preferred,
-            ClaudeProviderProtocol::Openai,
-            ClaudeProviderProtocol::Anthropic,
-        ]
-    };
-    for protocol in pool {
-        if !candidates.contains(&protocol) {
-            candidates.push(protocol);
-        }
-    }
-    candidates
-}
-
-fn ordered_gemini_protocol_candidates(
-    first: GeminiProviderProtocol,
-    preferred: GeminiProviderProtocol,
-) -> Vec<GeminiProviderProtocol> {
-    let mut candidates = vec![first];
-    // Only include Google as a fallback when the URL looks like a Google endpoint.
-    let pool = if preferred == GeminiProviderProtocol::Google {
-        vec![
-            preferred,
-            GeminiProviderProtocol::Google,
-            GeminiProviderProtocol::Openai,
-            GeminiProviderProtocol::Anthropic,
-        ]
-    } else {
-        vec![
-            preferred,
-            GeminiProviderProtocol::Openai,
-            GeminiProviderProtocol::Anthropic,
-        ]
-    };
-    for protocol in pool {
-        if !candidates.contains(&protocol) {
-            candidates.push(protocol);
-        }
-    }
-    candidates
-}
-
-async fn probe_claude_protocol(
-    key: &ApiKey,
-    protocol: ClaudeProviderProtocol,
-    _model: Option<&str>,
-) -> ClaudeProtocolProbeOutcome {
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(3))
-        .connect_timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return ClaudeProtocolProbeOutcome::Inconclusive,
-    };
-
-    let response = match protocol {
-        ClaudeProviderProtocol::Anthropic => {
-            let base = normalize_base_url(&key.base_url);
-            let url = format!("{}/v1/messages", base);
-            client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", key.key.as_str()))
-                .header("x-api-key", key.key.as_str())
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .header("User-Agent", format!("aivo/{}", crate::version::VERSION))
-                .json(&json!({
-                    "model": "aivo-probe",
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 1,
-                    "stream": false
-                }))
-                .send()
-                .await
-        }
-        ClaudeProviderProtocol::Google => {
-            let url = build_google_models_probe_url(&key.base_url);
-            client
-                .get(&url)
-                .header("x-goog-api-key", key.key.as_str())
-                .header("User-Agent", format!("aivo/{}", crate::version::VERSION))
-                .send()
-                .await
-        }
-        ClaudeProviderProtocol::Openai => {
-            let url = http_utils::build_chat_completions_url(&key.base_url);
-            client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", key.key.as_str()))
-                .header("Content-Type", "application/json")
-                .header("User-Agent", format!("aivo/{}", crate::version::VERSION))
-                .json(&json!({
-                    "model": "aivo-probe",
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 1,
-                    "stream": false
-                }))
-                .send()
-                .await
-        }
-    };
-
-    let response = match response {
-        Ok(response) => response,
-        Err(_) => return ClaudeProtocolProbeOutcome::Inconclusive,
-    };
-
-    match response.status().as_u16() {
-        200 | 400 | 401 | 403 | 422 | 429 => ClaudeProtocolProbeOutcome::Supported,
-        404 | 405 | 415 => ClaudeProtocolProbeOutcome::Unsupported,
-        _ => ClaudeProtocolProbeOutcome::Inconclusive,
-    }
-}
-
-async fn probe_openai_responses_compatibility(key: &ApiKey) -> ClaudeProtocolProbeOutcome {
-    probe_openai_json_endpoint(
-        &key.base_url,
-        &key.key,
-        "/v1/responses",
-        json!({
-            "model": "aivo-probe",
-            "input": "ping",
-            "max_output_tokens": 1,
-            "stream": false
-        }),
-    )
-    .await
-}
-
-async fn probe_openai_chat_compatibility(key: &ApiKey) -> ClaudeProtocolProbeOutcome {
-    probe_openai_json_endpoint(
-        &key.base_url,
-        &key.key,
-        "/v1/chat/completions",
-        json!({
-            "model": "aivo-probe",
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-            "stream": false
-        }),
-    )
-    .await
-}
-
-async fn probe_gemini_protocol(
-    key: &ApiKey,
-    protocol: GeminiProviderProtocol,
-) -> ClaudeProtocolProbeOutcome {
-    match protocol {
-        GeminiProviderProtocol::Google => probe_google_models_compatibility(key).await,
-        GeminiProviderProtocol::Openai => probe_openai_chat_compatibility(key).await,
-        GeminiProviderProtocol::Anthropic => {
-            probe_claude_protocol(key, ClaudeProviderProtocol::Anthropic, None).await
-        }
-    }
-}
-
-async fn probe_google_models_compatibility(key: &ApiKey) -> ClaudeProtocolProbeOutcome {
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(3))
-        .connect_timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return ClaudeProtocolProbeOutcome::Inconclusive,
-    };
-
-    let url = build_google_models_probe_url(&key.base_url);
-    let response = match client
-        .get(&url)
-        .header("x-goog-api-key", key.key.as_str())
-        .header("User-Agent", format!("aivo/{}", crate::version::VERSION))
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(_) => return ClaudeProtocolProbeOutcome::Inconclusive,
-    };
-
-    match response.status().as_u16() {
-        200 | 400 | 401 | 403 | 429 => ClaudeProtocolProbeOutcome::Supported,
-        404 | 405 | 415 => ClaudeProtocolProbeOutcome::Unsupported,
-        _ => ClaudeProtocolProbeOutcome::Inconclusive,
-    }
-}
-
-fn build_google_models_probe_url(base_url: &str) -> String {
-    let base = normalize_base_url(base_url).trim_end_matches('/');
-    if base.ends_with("/v1beta") || base.ends_with("/v1") {
-        format!("{}/models", base)
-    } else if base.ends_with("/models") {
-        base.to_string()
-    } else {
-        format!("{}/v1beta/models", base)
-    }
-}
-
-async fn probe_openai_json_endpoint(
-    base_url: &str,
-    api_key: &str,
-    path: &str,
-    body: serde_json::Value,
-) -> ClaudeProtocolProbeOutcome {
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(3))
-        .connect_timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return ClaudeProtocolProbeOutcome::Inconclusive,
-    };
-
-    let target_url = http_utils::build_target_url(base_url, path);
-    let response = match client
-        .post(&target_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .header("User-Agent", format!("aivo/{}", crate::version::VERSION))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(_) => return ClaudeProtocolProbeOutcome::Inconclusive,
-    };
-
-    match response.status().as_u16() {
-        200 | 400 | 401 | 403 | 422 | 429 => ClaudeProtocolProbeOutcome::Supported,
-        404 | 405 | 415 => ClaudeProtocolProbeOutcome::Unsupported,
-        _ => ClaudeProtocolProbeOutcome::Inconclusive,
     }
 }
 
