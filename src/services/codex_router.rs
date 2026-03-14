@@ -188,7 +188,7 @@ async fn handle_responses_api_via_chat(
 // =============================================================================
 
 async fn handle_chat_completions_with_filter(
-    path: &str,
+    _path: &str,
     body: &Value,
     config: &Arc<CodexRouterConfig>,
     client: &reqwest::Client,
@@ -217,22 +217,6 @@ async fn handle_chat_completions_with_filter(
             &config.target_base_url,
             config.model_prefix.as_deref(),
         );
-    }
-
-    if u8_to_protocol(active_protocol.load(Ordering::Relaxed)) == ProviderProtocol::Openai {
-        let target_url = build_target_url(&config.target_base_url, path);
-        let response = http_utils::authorized_openai_post(
-            client,
-            &target_url,
-            &config.api_key,
-            config.copilot_token_manager.as_deref(),
-        )
-        .await?
-        .json(&body)
-        .send()
-        .await?;
-
-        return http_utils::buffered_reqwest_to_http_response(response).await;
     }
 
     let chat_response =
