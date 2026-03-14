@@ -13,6 +13,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::services::anthropic_chat_request::{
     AnthropicToOpenAIConfig, convert_anthropic_to_openai_request,
@@ -31,7 +32,7 @@ use crate::services::openai_gemini_bridge::{
     convert_gemini_to_openai_chat_response, convert_openai_chat_to_gemini_request,
     openai_chat_model,
 };
-use crate::services::provider_protocol::ProviderProtocol;
+use crate::services::provider_protocol::{ProviderProtocol, fallback_protocols, is_protocol_mismatch};
 
 #[derive(Clone)]
 pub struct OpenAIRouterConfig {
@@ -57,6 +58,7 @@ pub struct OpenAIRouter {
 struct OpenAIRouterState {
     config: Arc<OpenAIRouterConfig>,
     client: reqwest::Client,
+    active_protocol: Arc<AtomicU8>,
 }
 
 enum RouterResponse {
@@ -79,6 +81,7 @@ impl OpenAIRouter {
         let state = OpenAIRouterState {
             config: Arc::new(self.config.clone()),
             client: router_http_client(),
+            active_protocol: Arc::new(AtomicU8::new(protocol_to_u8(self.config.target_protocol))),
         };
         let handle = tokio::spawn(async move { run_router(listener, state).await });
         Ok((port, handle))
@@ -90,6 +93,7 @@ async fn run_router(listener: tokio::net::TcpListener, state: OpenAIRouterState)
         let (mut socket, _) = listener.accept().await?;
         let config = state.config.clone();
         let client = state.client.clone();
+        let active_protocol = state.active_protocol.clone();
 
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
@@ -111,7 +115,7 @@ async fn run_router(listener: tokio::net::TcpListener, state: OpenAIRouterState)
                 return;
             }
 
-            let response = match handle_anthropic_to_upstream(&request, &config, &client).await {
+            let response = match handle_anthropic_to_upstream(&request, &config, &client, &active_protocol).await {
                 Ok(response) => response,
                 Err(e) => {
                     let error = http_utils::http_error_response(500, &e.to_string());
@@ -146,6 +150,22 @@ async fn write_router_response(
     Ok(())
 }
 
+fn protocol_to_u8(p: ProviderProtocol) -> u8 {
+    match p {
+        ProviderProtocol::Openai => 0,
+        ProviderProtocol::Anthropic => 1,
+        ProviderProtocol::Google => 2,
+    }
+}
+
+fn u8_to_protocol(v: u8) -> ProviderProtocol {
+    match v {
+        1 => ProviderProtocol::Anthropic,
+        2 => ProviderProtocol::Google,
+        _ => ProviderProtocol::Openai,
+    }
+}
+
 /// Apply an optional prefix to a model name, skipping if the prefix is already present.
 fn apply_model_prefix(model: &str, prefix: Option<&str>) -> String {
     match prefix {
@@ -159,6 +179,7 @@ async fn handle_anthropic_to_upstream(
     request: &str,
     config: &Arc<OpenAIRouterConfig>,
     client: &reqwest::Client,
+    active_protocol: &Arc<AtomicU8>,
 ) -> Result<RouterResponse> {
     let mut passthrough_headers = http_utils::extract_passthrough_headers(request)?;
     let body_str = http_utils::extract_request_body(request)?;
@@ -172,106 +193,151 @@ async fn handle_anthropic_to_upstream(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Transform model name: add prefix if configured (e.g., "@cf/" for Cloudflare)
-    if config.target_protocol == ProviderProtocol::Openai
-        && let Some(model) = simplified.get_mut("model")
-        && let Some(model_str) = model.as_str()
-    {
-        *model = Value::String(apply_model_prefix(
-            model_str,
-            config.model_prefix.as_deref(),
-        ));
+    let current = u8_to_protocol(active_protocol.load(Ordering::Relaxed));
+    let mut candidates = std::iter::once(current)
+        .chain(fallback_protocols(current, &config.target_base_url))
+        .collect::<Vec<_>>();
+
+    let mut last_response: Option<RouterResponse> = None;
+
+    for (attempt, protocol) in candidates.drain(..).enumerate() {
+        // Apply model prefix for OpenAI protocol
+        let mut req_body = simplified.clone();
+        if protocol == ProviderProtocol::Openai
+            && let Some(model) = req_body.get_mut("model")
+            && let Some(model_str) = model.as_str()
+        {
+            *model = Value::String(apply_model_prefix(
+                model_str,
+                config.model_prefix.as_deref(),
+            ));
+        }
+
+        let (status_code, response_opt) = match protocol {
+            ProviderProtocol::Google => {
+                req_body["stream"] = json!(false);
+                let model = openai_chat_model(&req_body, "gemini-2.5-pro");
+                let google_body = convert_openai_chat_to_gemini_request(
+                    &req_body,
+                    &OpenAIToGeminiConfig {
+                        default_model: "gemini-2.5-pro",
+                    },
+                );
+                let url = build_google_generate_content_url(&config.target_base_url, &model);
+                let response = client
+                    .post(&url)
+                    .headers(passthrough_headers.clone())
+                    .header("x-goog-api-key", config.target_api_key.as_str())
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", "aivo-router/1.0")
+                    .json(&google_body)
+                    .send()
+                    .await?;
+
+                let status_code = response.status().as_u16();
+                let response_body = response.text().await?;
+                if is_protocol_mismatch(status_code) {
+                    (status_code, None)
+                } else if status_code >= 400 {
+                    let r = RouterResponse::Buffered {
+                        status: status_code,
+                        content_type: "application/json".to_string(),
+                        body: response_body.into_bytes(),
+                    };
+                    (status_code, Some(r))
+                } else {
+                    let google_response: Value = serde_json::from_str(&response_body)?;
+                    let openai_response =
+                        convert_gemini_to_openai_chat_response(&google_response, &model);
+                    let r = if requested_stream {
+                        let openai_sse = convert_openai_chat_response_to_sse(&openai_response);
+                        let anthropic_sse = convert_openai_sse_to_anthropic(&openai_sse, 200)?;
+                        RouterResponse::Buffered {
+                            status: 200,
+                            content_type: "text/event-stream".to_string(),
+                            body: anthropic_sse.into_bytes(),
+                        }
+                    } else {
+                        RouterResponse::Buffered {
+                            status: 200,
+                            content_type: "application/json".to_string(),
+                            body: convert_openai_to_anthropic(&openai_response.to_string(), 200)?
+                                .into_bytes(),
+                        }
+                    };
+                    (status_code, Some(r))
+                }
+            }
+            _ => {
+                // OpenAI or Anthropic — use chat completions endpoint
+                let url = http_utils::build_chat_completions_url(&config.target_base_url);
+                let response = client
+                    .post(&url)
+                    .headers(passthrough_headers.clone())
+                    .header("Authorization", format!("Bearer {}", config.target_api_key))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", "aivo-router/1.0")
+                    .json(&req_body)
+                    .send()
+                    .await?;
+
+                let status_code = response.status().as_u16();
+                if is_protocol_mismatch(status_code) {
+                    (status_code, None)
+                } else {
+                    let is_streaming = response
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|ct| ct.contains("text/event-stream"))
+                        .unwrap_or(false);
+                    let response_body = response.text().await?;
+                    let r = if status_code == 200
+                        && (is_streaming || response_body.starts_with("data:"))
+                    {
+                        let anthropic_sse =
+                            convert_openai_sse_to_anthropic(&response_body, status_code)?;
+                        RouterResponse::Buffered {
+                            status: 200,
+                            content_type: "text/event-stream".to_string(),
+                            body: anthropic_sse.into_bytes(),
+                        }
+                    } else {
+                        let anthropic_response =
+                            convert_openai_to_anthropic(&response_body, status_code)?;
+                        RouterResponse::Buffered {
+                            status: status_code,
+                            content_type: "application/json".to_string(),
+                            body: anthropic_response.into_bytes(),
+                        }
+                    };
+                    (status_code, Some(r))
+                }
+            }
+        };
+
+        if let Some(r) = response_opt {
+            // Success (not a protocol mismatch)
+            if attempt > 0 {
+                active_protocol.store(protocol_to_u8(protocol), Ordering::Relaxed);
+                eprintln!("  • Protocol auto-switched to {}", protocol.as_str());
+            }
+            return Ok(r);
+        }
+        // Protocol mismatch — try next candidate
+        last_response = Some(RouterResponse::Buffered {
+            status: status_code,
+            content_type: "application/json".to_string(),
+            body: format!("{{\"error\":\"Protocol mismatch ({})\"}}", status_code).into_bytes(),
+        });
     }
 
-    match config.target_protocol {
-        ProviderProtocol::Google => {
-            simplified["stream"] = json!(false);
-            let model = openai_chat_model(&simplified, "gemini-2.5-pro");
-            let google_body = convert_openai_chat_to_gemini_request(
-                &simplified,
-                &OpenAIToGeminiConfig {
-                    default_model: "gemini-2.5-pro",
-                },
-            );
-            let url = build_google_generate_content_url(&config.target_base_url, &model);
-            let response = client
-                .post(&url)
-                .headers(passthrough_headers.clone())
-                .header("x-goog-api-key", config.target_api_key.as_str())
-                .header("Content-Type", "application/json")
-                .header("User-Agent", "aivo-router/1.0")
-                .json(&google_body)
-                .send()
-                .await?;
-
-            let status_code = response.status().as_u16();
-            let response_body = response.text().await?;
-            if status_code >= 400 {
-                return Ok(RouterResponse::Buffered {
-                    status: status_code,
-                    content_type: "application/json".to_string(),
-                    body: response_body.into_bytes(),
-                });
-            }
-
-            let google_response: Value = serde_json::from_str(&response_body)?;
-            let openai_response = convert_gemini_to_openai_chat_response(&google_response, &model);
-            if requested_stream {
-                let openai_sse = convert_openai_chat_response_to_sse(&openai_response);
-                let anthropic_sse = convert_openai_sse_to_anthropic(&openai_sse, 200)?;
-                Ok(RouterResponse::Buffered {
-                    status: 200,
-                    content_type: "text/event-stream".to_string(),
-                    body: anthropic_sse.into_bytes(),
-                })
-            } else {
-                Ok(RouterResponse::Buffered {
-                    status: 200,
-                    content_type: "application/json".to_string(),
-                    body: convert_openai_to_anthropic(&openai_response.to_string(), 200)?
-                        .into_bytes(),
-                })
-            }
-        }
-        _ => {
-            let url = http_utils::build_chat_completions_url(&config.target_base_url);
-            let response = client
-                .post(&url)
-                .headers(passthrough_headers)
-                .header("Authorization", format!("Bearer {}", config.target_api_key))
-                .header("Content-Type", "application/json")
-                .header("User-Agent", "aivo-router/1.0")
-                .json(&simplified)
-                .send()
-                .await?;
-
-            let status_code = response.status().as_u16();
-            let is_streaming = response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .map(|ct| ct.contains("text/event-stream"))
-                .unwrap_or(false);
-            let response_body = response.text().await?;
-
-            if status_code == 200 && (is_streaming || response_body.starts_with("data:")) {
-                let anthropic_sse = convert_openai_sse_to_anthropic(&response_body, status_code)?;
-                return Ok(RouterResponse::Buffered {
-                    status: 200,
-                    content_type: "text/event-stream".to_string(),
-                    body: anthropic_sse.into_bytes(),
-                });
-            }
-
-            let anthropic_response = convert_openai_to_anthropic(&response_body, status_code)?;
-
-            Ok(RouterResponse::Buffered {
-                status: status_code,
-                content_type: "application/json".to_string(),
-                body: anthropic_response.into_bytes(),
-            })
-        }
-    }
+    // All candidates exhausted — return last error
+    Ok(last_response.unwrap_or(RouterResponse::Buffered {
+        status: 503,
+        content_type: "application/json".to_string(),
+        body: b"{\"error\":\"No compatible protocol found\"}".to_vec(),
+    }))
 }
 
 fn anthropic_to_openai(body: &Value, requires_reasoning_content: bool) -> Value {
