@@ -94,18 +94,14 @@ async fn handle_request(
             let model = config.forced_model.clone().unwrap_or(extracted_model);
             let body: Value = serde_json::from_str(http_utils::extract_request_body(request)?)?;
             let tool_schemas = extract_tool_schemas(&body);
-            let mut openai_req = convert_gemini_to_openai(
+            let openai_req = convert_gemini_to_openai(
                 &body,
                 &model,
                 config.requires_reasoning_content,
                 config.max_tokens_cap,
             );
-            let selected_model = select_model_for_protocol(
-                openai_req.get("model").and_then(|v| v.as_str()),
-                None,
-                u8_to_protocol(active_protocol.load(Ordering::Relaxed)),
-            );
-            openai_req["model"] = serde_json::json!(selected_model);
+            // openai_req already has the model from the Gemini request body — don't pre-select here;
+            // select_model_for_protocol is applied per-attempt inside forward_to_provider.
             let openai_response = forward_to_provider(openai_req, config, client, active_protocol).await?;
             let openai_response = repair_tool_call_args(openai_response, &tool_schemas);
 
@@ -135,10 +131,19 @@ async fn forward_to_provider(
 
     let mut last_err = String::from("No protocol candidates");
     for (attempt, protocol) in candidates.into_iter().enumerate() {
+        // Select the right model name for this protocol attempt.
+        let mut req_body = openai_req.clone();
+        let selected_model = select_model_for_protocol(
+            req_body.get("model").and_then(|v| v.as_str()),
+            None,
+            protocol,
+        );
+        req_body["model"] = serde_json::json!(selected_model);
+
         let (status, body_text) = match protocol {
             ProviderProtocol::Anthropic => {
                 let mut anthropic_req = convert_openai_chat_to_anthropic_request(
-                    &openai_req,
+                    &req_body,
                     &OpenAIToAnthropicChatConfig {
                         default_model: "claude-sonnet-4-5",
                     },
@@ -166,7 +171,7 @@ async fn forward_to_provider(
                     config.copilot_token_manager.as_deref(),
                 )
                 .await?
-                .json(&openai_req)
+                .json(&req_body)
                 .send()
                 .await?;
                 (response.status().as_u16(), response.text().await?)
@@ -193,7 +198,7 @@ async fn forward_to_provider(
                 let anthropic_response: Value = serde_json::from_str(&body_text)?;
                 Ok(convert_anthropic_to_openai_chat_response(
                     &anthropic_response,
-                    openai_req
+                    req_body
                         .get("model")
                         .and_then(|v| v.as_str())
                         .unwrap_or("gemini-2.5-pro"),
