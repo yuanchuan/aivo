@@ -1,0 +1,57 @@
+name: Size check
+
+# Builds the linux-x64 (musl static) binary exactly as release.yml does and
+# enforces the < 10 MB budget. Runs on every main push / PR so a size regression
+# or a broken build-std toolchain surfaces BEFORE tagging — a failed release
+# can't be re-cut on the same tag, so we never want to discover this at tag time.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: size-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-12
+          targets: x86_64-unknown-linux-musl
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build linux-x64 (build-std, size-optimized)
+        run: |
+          RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort" \
+            cargo +nightly-2026-03-12 build --release \
+            -Z build-std=std,panic_abort --target x86_64-unknown-linux-musl
+
+      - name: Enforce < 10 MB size budget
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/aivo
+          sz=$(stat -c%s "$bin")
+          mib=$(awk "BEGIN{printf \"%.2f\", $sz/1048576}")
+          warn=10170000   # ~9.7 MiB — early warning before the ceiling
+          hard=10485760   # 10 MiB — the hard < 10M requirement
+          echo "linux-x64 (musl static): $sz bytes = ${mib} MiB (ceiling 10 MiB)"
+          if [ "$sz" -gt "$hard" ]; then
+            echo "::error::linux-x64 is ${mib} MiB, over the 10 MiB budget"
+            exit 1
+          elif [ "$sz" -gt "$warn" ]; then
+            echo "::warning::linux-x64 is ${mib} MiB — within 0.3 MiB of the 10 MiB ceiling; plan to shrink"
+          fi

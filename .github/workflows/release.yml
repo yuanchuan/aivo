@@ -17,6 +17,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             runs-on: ubuntu-latest
             artifact: aivo-linux-x64
+            buildstd: true   # rebuild std w/ panic=immediate-abort to keep the binary < 10 MB
           - target: aarch64-unknown-linux-musl
             runs-on: ubuntu-latest
             artifact: aivo-linux-arm64
@@ -41,6 +42,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # linux-x64 only: nightly + rust-src for -Z build-std size reduction.
+      # Pinned nightly (interface: -Cpanic=immediate-abort strategy flag).
+      - uses: dtolnay/rust-toolchain@master
+        if: matrix.buildstd
+        with:
+          toolchain: nightly-2026-03-12
+          targets: ${{ matrix.target }}
+          components: rust-src
+
       - uses: Swatinem/rust-cache@v2
         if: ${{ !matrix.use-cross }}
 
@@ -59,6 +69,12 @@ jobs:
         run: |
           if [[ "${{ matrix.use-cross }}" == "true" ]]; then
             cross build --release --target ${{ matrix.target }}
+          elif [[ "${{ matrix.buildstd }}" == "true" ]]; then
+            # Shrink the musl static binary below 10 MB by rebuilding std with
+            # panic=immediate-abort (drops panic/format machinery). Nightly-only.
+            RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort" \
+              cargo +nightly-2026-03-12 build --release \
+              -Z build-std=std,panic_abort --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
