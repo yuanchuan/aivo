@@ -37,9 +37,10 @@ jobs:
 
       - name: Build linux-x64 (build-std, size-optimized)
         run: |
-          RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort" \
+          RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none" \
             cargo +nightly-2026-07-08 build --release \
-            -Z build-std=std,panic_abort --target x86_64-unknown-linux-musl
+            -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size \
+            --target x86_64-unknown-linux-musl
 
       - name: Enforce < 10 MB size budget
         run: |
