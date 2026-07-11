@@ -210,6 +210,18 @@ pub struct CursorTodosUpdate {
 /// Non-blocking sink for `cursor/update_todos` (returns immediately).
 pub type CursorTodosSink = Arc<dyn Fn(CursorTodosUpdate) + Send + Sync>;
 
+/// A `cursor/task` notice — the only frame carrying the real task description
+/// (the `tool_call` title is a generic `Task: Subagent task`).
+pub struct CursorTaskNotice {
+    pub tool_call_id: String,
+    pub description: String,
+    pub prompt: String,
+    pub subagent_type: String,
+}
+
+/// Non-blocking sink for `cursor/task` (returns immediately).
+pub type CursorTaskSink = Arc<dyn Fn(CursorTaskNotice) + Send + Sync>;
+
 pub struct CursorPlanPhase {
     pub name: String,
     pub todos: Vec<CursorTodo>,
@@ -243,11 +255,15 @@ pub struct CursorInteractionHooks {
     pub ask_question: Option<CursorAskQuestionPrompt>,
     pub update_todos: Option<CursorTodosSink>,
     pub create_plan: Option<CursorPlanPrompt>,
+    pub task: Option<CursorTaskSink>,
 }
 
 impl CursorInteractionHooks {
     fn is_empty(&self) -> bool {
-        self.ask_question.is_none() && self.update_todos.is_none() && self.create_plan.is_none()
+        self.ask_question.is_none()
+            && self.update_todos.is_none()
+            && self.create_plan.is_none()
+            && self.task.is_none()
     }
 }
 
@@ -275,10 +291,33 @@ fn build_ext_method_fn(hooks: CursorInteractionHooks) -> Option<ExtMethodFn> {
                     let outcome = prompt(parse_cursor_plan_request(&params)).await;
                     Some(cursor_plan_outcome_to_result(outcome))
                 }
+                "cursor/task" => {
+                    let sink = hooks.task.as_ref()?;
+                    sink(parse_cursor_task_notice(&params));
+                    Some(json!({}))
+                }
                 _ => None,
             }
         })
     }))
+}
+
+/// Parse a `cursor/task` notice (`{toolCallId, description, prompt, subagentType, …}`).
+fn parse_cursor_task_notice(params: &Value) -> CursorTaskNotice {
+    let s = |k: &str| {
+        params
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    CursorTaskNotice {
+        tool_call_id: s("toolCallId"),
+        description: s("description"),
+        prompt: s("prompt"),
+        subagent_type: s("subagentType"),
+    }
 }
 
 /// Parse a `[{id, content, status}]` array, dropping items missing id/content.
@@ -1676,6 +1715,18 @@ fn normalize_tool_call(update: &Value) -> (String, Value) {
             ("run_bash".into(), serde_json::json!({ "command": command }))
         }
         _ => {
+            // A delegation (`Task: <desc>` title / "task" kind) renders as a
+            // delegation, not raw-title jargon like `running Task: Subagent task`.
+            let task_desc = title
+                .strip_prefix("Task:")
+                .or_else(|| (kind == "task" || title == "Task").then_some(""));
+            if let Some(desc) = task_desc {
+                let label = raw_input_str(update, TASK_LABEL_KEYS).unwrap_or(desc.trim());
+                return (
+                    "subagent".to_string(),
+                    serde_json::json!({ "label": label }),
+                );
+            }
             let name = if title.is_empty() { "tool" } else { title };
             (name.to_string(), Value::Null)
         }
@@ -1695,6 +1746,7 @@ const PATH_KEYS: &[&str] = &[
 ];
 const PATTERN_KEYS: &[&str] = &["pattern", "query", "regex", "search"];
 const COMMAND_KEYS: &[&str] = &["command", "cmd"];
+const TASK_LABEL_KEYS: &[&str] = &["description", "label", "task"];
 
 /// First string value among `keys` in the event's `rawInput`.
 fn raw_input_str<'a>(update: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -1993,6 +2045,45 @@ mod tests {
         assert!(!update.merge); // absent → false (replace)
         assert_eq!(update.todos.len(), 1); // the id-less item is dropped
         assert_eq!(update.todos[0].status, "pending"); // absent status → pending
+    }
+
+    #[test]
+    fn parse_cursor_task_notice_reads_fields() {
+        let notice = parse_cursor_task_notice(&json!({
+            "toolCallId": "tool_60759ef1",
+            "description": "Audit the auth flow",
+            "prompt": "You are auditing…",
+            "subagentType": "explore",
+            "model": "composer-2.5",
+        }));
+        assert_eq!(notice.tool_call_id, "tool_60759ef1");
+        assert_eq!(notice.description, "Audit the auth flow");
+        assert_eq!(notice.prompt, "You are auditing…");
+        assert_eq!(notice.subagent_type, "explore");
+        // A failed spawn sends empty strings — parsed, not panicked.
+        let empty =
+            parse_cursor_task_notice(&json!({"toolCallId": "t", "subagentType": "unspecified"}));
+        assert!(empty.description.is_empty() && empty.prompt.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ext_method_fn_dispatches_cursor_task_to_sink() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink_seen = seen.clone();
+        let hooks = CursorInteractionHooks {
+            task: Some(Arc::new(move |notice: CursorTaskNotice| {
+                sink_seen.lock().unwrap().push(notice.description);
+            })),
+            ..Default::default()
+        };
+        let f = build_ext_method_fn(hooks).expect("task hook set → fn built");
+        let reply = f(
+            "cursor/task".to_string(),
+            json!({"toolCallId": "t1", "description": "Map the engine", "prompt": "…"}),
+        )
+        .await;
+        assert_eq!(reply, Some(json!({}))); // non-blocking ack
+        assert_eq!(*seen.lock().unwrap(), vec!["Map the engine".to_string()]);
     }
 
     #[test]
@@ -2791,6 +2882,28 @@ mod tests {
         assert_eq!(
             normalize_tool_call(&other),
             ("Fetch URL".to_string(), Value::Null)
+        );
+
+        // Delegation titles map onto the `subagent` vocabulary.
+        let task = serde_json::json!({"kind": "other", "title": "Task: Subagent task"});
+        assert_eq!(
+            normalize_tool_call(&task),
+            (
+                "subagent".to_string(),
+                serde_json::json!({"label": "Subagent task"})
+            )
+        );
+        // rawInput's description (when cursor sends one) beats the title suffix.
+        let task = serde_json::json!({
+            "kind": "task", "title": "Task",
+            "rawInput": {"description": "audit the auth flow"},
+        });
+        assert_eq!(
+            normalize_tool_call(&task),
+            (
+                "subagent".to_string(),
+                serde_json::json!({"label": "audit the auth flow"})
+            )
         );
 
         // Real cursor shape: empty rawInput + a generic title → no fake target

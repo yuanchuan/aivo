@@ -681,6 +681,7 @@ impl CodeTuiApp {
         };
         let mut obj = serde_json::from_str::<serde_json::Value>(&entry.content)
             .unwrap_or_else(|_| serde_json::json!({}));
+        let args_updated = args.is_some();
         if let Some(args) = args {
             obj["args"] = args;
         }
@@ -691,6 +692,20 @@ impl CodeTuiApp {
             obj["failed"] = serde_json::Value::Bool(true);
         }
         entry.content = obj.to_string();
+        // Enriched args on a live call refresh the status label too
+        // (a `cursor/task` notice delivers the real task after the call frame).
+        let relabel = (args_updated && decode_tool_outcome(&entry.content).0.is_none() && !failed)
+            .then(|| super::render::decode_tool_call(&entry.content));
+        if let Some((name, new_args)) = relabel {
+            let cwd = if self.real_cwd.is_empty() {
+                self.cwd.clone()
+            } else {
+                self.real_cwd.clone()
+            };
+            if let Some((label, _, _)) = self.last_tool_action.as_mut() {
+                *label = super::render::tool_action_label(&name, &new_args, &cwd);
+            }
+        }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
     }
 

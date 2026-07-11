@@ -141,18 +141,21 @@ impl CodeTuiApp {
         // coalesced call line drops its target list to avoid repeating it.
         let separate_results = self.history.iter().any(|m| m.role == "tool_result");
 
-        // Hide an in-flight tool's card (trailing `tool_call`, no result yet)
-        // while sending — the status line names it instead, so it's not shown
-        // twice. It renders once its result lands (no longer at the tail).
+        // Hide the trailing `tool_call` run while any of it is in flight — the
+        // status line (and batch rows) names the work instead. Cursor resolves
+        // entries out of order, so the cards wait for the whole run.
         let mut render_len = self.history.len();
         if self.sending {
-            while render_len > 0 {
-                let m = &self.history[render_len - 1];
-                if m.role == "tool_call" && decode_tool_outcome(&m.content).0.is_none() {
-                    render_len -= 1;
-                } else {
-                    break;
-                }
+            let mut start = render_len;
+            while start > 0 && self.history[start - 1].role == "tool_call" {
+                start -= 1;
+            }
+            let live = self.history[start..render_len].iter().any(|m| {
+                let (result, failed) = decode_tool_outcome(&m.content);
+                result.is_none() && !failed
+            });
+            if live {
+                render_len = start;
             }
         }
 
@@ -611,6 +614,21 @@ impl CodeTuiApp {
                 self.subagent_rows.len()
             );
         }
+        // A bridged parallel batch: count the trailing run rather than naming
+        // only the newest call.
+        if let Some((start, total, done)) = self.trailing_tool_batch()
+            && total >= 2
+        {
+            let all_delegates = self.history[start..].iter().all(|m| {
+                super::render::canonical_tool_name(&decode_tool_call(&m.content).0) == "subagent"
+            });
+            let noun = if all_delegates {
+                "sub-agents"
+            } else {
+                "parallel steps"
+            };
+            return format!("running {total} {noun} ({done} done)");
+        }
         if let Some(action) = self.current_action_label() {
             return action;
         }
@@ -671,15 +689,42 @@ impl CodeTuiApp {
     }
 
     /// Live parallel-batch rows, styled like the spinner they sit under. Empty
-    /// when idle so an interrupted batch can't leave ghost rows.
+    /// when idle so an interrupted batch can't leave ghost rows. Without sink
+    /// rows (a bridged engine), a trailing parallel run derives its rows from
+    /// the history entries instead.
     fn subagent_status_rows(&self) -> Vec<StyledLine> {
         if !self.sending {
             return Vec::new();
         }
         let style = Style::default().fg(MUTED).add_modifier(Modifier::ITALIC);
-        self.subagent_rows
+        if !self.subagent_rows.is_empty() {
+            return self
+                .subagent_rows
+                .iter()
+                .map(|row| line_plain(super::render::subagent_row_text(row), style))
+                .collect();
+        }
+        let Some((start, total, _)) = self.trailing_tool_batch() else {
+            return Vec::new();
+        };
+        if total < 2 {
+            return Vec::new();
+        }
+        let cwd = if self.real_cwd.is_empty() {
+            self.cwd.as_str()
+        } else {
+            self.real_cwd.as_str()
+        };
+        self.history[start..]
             .iter()
-            .map(|row| line_plain(super::render::subagent_row_text(row), style))
+            .map(|m| {
+                let (name, args) = decode_tool_call(&m.content);
+                let outcome = decode_tool_outcome(&m.content);
+                line_plain(
+                    super::render::parallel_call_row_text(&name, &args, outcome, cwd),
+                    style,
+                )
+            })
             .collect()
     }
 
@@ -2867,24 +2912,36 @@ impl CodeTuiApp {
 
     /// Present-tense label for the in-flight tool step (e.g. `running grep`), or
     /// `None`. Uses the same in-flight test that hides the tool's card (trailing
-    /// `tool_call`, no result yet), so the status and the card never both show.
+    /// `tool_call` run with a pending result), so the status and the card never
+    /// both show.
     pub(super) fn current_action_label(&self) -> Option<String> {
-        if !self.sending {
-            return None;
-        }
-        if !self.pending_response.is_empty() || !self.incoming_buffer.is_empty() {
-            return None;
-        }
-        let in_flight = self
-            .history
-            .last()
-            .is_some_and(|m| m.role == "tool_call" && decode_tool_outcome(&m.content).0.is_none());
-        if !in_flight {
-            return None;
-        }
+        self.trailing_tool_batch()?;
         self.last_tool_action
             .as_ref()
             .map(|(label, _, _)| label.clone())
+    }
+
+    /// The trailing contiguous `tool_call` run while the model is between
+    /// replies: `(start index, total, resolved)`. `None` when idle, once reply
+    /// text is streaming, or when every call has its outcome — cursor resolves
+    /// entries in place, so a batch stays live until its last member resolves.
+    pub(super) fn trailing_tool_batch(&self) -> Option<(usize, usize, usize)> {
+        if !self.sending || !self.pending_response.is_empty() || !self.incoming_buffer.is_empty() {
+            return None;
+        }
+        let mut start = self.history.len();
+        while start > 0 && self.history[start - 1].role == "tool_call" {
+            start -= 1;
+        }
+        let total = self.history.len() - start;
+        let done = self.history[start..]
+            .iter()
+            .filter(|m| {
+                let (result, failed) = decode_tool_outcome(&m.content);
+                result.is_some() || failed
+            })
+            .count();
+        (done < total).then_some((start, total, done))
     }
 
     /// Tokens to show in the footer fill right now, and whether the figure is a

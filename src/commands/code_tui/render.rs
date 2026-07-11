@@ -887,6 +887,42 @@ pub(super) fn subagent_row_text(row: &super::shared::SubagentRow) -> String {
     line
 }
 
+/// One row for a call in a trailing parallel batch: `↳ Audit the auth flow`,
+/// flipping to `✓ Audit the auth flow — 34 lines` / `✗ … — <error>`. No
+/// per-row clock — history entries carry no start time.
+pub(super) fn parallel_call_row_text(
+    name: &str,
+    args: &serde_json::Value,
+    outcome: (Option<String>, bool),
+    cwd: &str,
+) -> String {
+    // A delegate reads as its task — the headline already says "sub-agents".
+    let label = if canonical_tool_name(name) == "subagent" {
+        let task = tool_arg_summary(name, args, cwd);
+        if task.is_empty() {
+            "sub-agent".to_string()
+        } else {
+            task
+        }
+    } else {
+        tool_action_label(name, args, cwd)
+    };
+    let detail = |text: &str| {
+        truncate_label(
+            text.lines().next().unwrap_or_default().trim(),
+            ACTION_TARGET_MAX_COLS,
+        )
+    };
+    match outcome {
+        (result, true) => format!(
+            "  ✗ {label} — {}",
+            detail(result.as_deref().unwrap_or("failed"))
+        ),
+        (Some(result), false) => format!("  ✓ {label} — {}", detail(&result)),
+        (None, false) => format!("  ↳ {label}"),
+    }
+}
+
 /// Footer context-stat color by fullness: a quiet signal that warms toward the
 /// model's window limit (compaction territory) before it's hit.
 pub(super) fn context_fill_color(pct: u64) -> Color {
@@ -3449,8 +3485,8 @@ pub(super) fn compact_lines_and_bars(lines: &mut Vec<StyledLine>, bars: &mut Vec
 #[cfg(test)]
 mod render_tests {
     use super::{
-        condense_subagent_task, render_edit_diff, strip_ansi_and_controls, subagent_row_text,
-        tool_arg_summary, tool_result_summary,
+        condense_subagent_task, parallel_call_row_text, render_edit_diff, strip_ansi_and_controls,
+        subagent_row_text, tool_arg_summary, tool_result_summary,
     };
 
     #[test]
@@ -3667,6 +3703,41 @@ mod render_tests {
         assert_eq!(
             subagent_row_text(&row),
             "  ✗ audit auth flow — no answer (1m 1s · 12 step(s))"
+        );
+    }
+
+    #[test]
+    fn parallel_call_row_text_forms() {
+        let args = serde_json::json!({"label": "Audit the auth flow"});
+        assert_eq!(
+            parallel_call_row_text("subagent", &args, (None, false), ""),
+            "  ↳ Audit the auth flow"
+        );
+        assert_eq!(
+            parallel_call_row_text(
+                "subagent",
+                &args,
+                (Some("34 lines\nmore".into()), false),
+                ""
+            ),
+            "  ✓ Audit the auth flow — 34 lines"
+        );
+        assert_eq!(
+            parallel_call_row_text("subagent", &args, (Some("boom".into()), true), ""),
+            "  ✗ Audit the auth flow — boom"
+        );
+        assert_eq!(
+            parallel_call_row_text("subagent", &serde_json::json!({}), (None, false), ""),
+            "  ↳ sub-agent"
+        );
+        assert_eq!(
+            parallel_call_row_text(
+                "grep",
+                &serde_json::json!({"pattern": "hover"}),
+                (None, false),
+                ""
+            ),
+            "  ↳ searching hover"
         );
     }
 

@@ -2946,6 +2946,99 @@ fn test_in_flight_tool_card_hidden_until_result() {
 }
 
 #[test]
+fn test_parallel_bridged_batch_counts_and_lists_calls() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.sending = true;
+    for (id, task) in [("1", "Audit auth"), ("2", "Map engine"), ("3", "Scan CLI")] {
+        app.apply_agent_tool_call(
+            Some(id.to_string()),
+            "subagent".to_string(),
+            serde_json::json!({"label": task}),
+            vec![],
+            None,
+        );
+    }
+    assert_eq!(app.desired_status(), "running 3 sub-agents (0 done)");
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(plain.contains("↳ Audit auth"), "per-call rows: {plain:?}");
+    assert!(plain.contains("↳ Scan CLI"), "per-call rows: {plain:?}");
+
+    // Newest call resolving first: no "Thinking" flip, card held with the batch.
+    app.apply_agent_tool_update("3".to_string(), None, Some("12 files".to_string()), false);
+    assert_eq!(app.desired_status(), "running 3 sub-agents (1 done)");
+    assert!(app.current_action_label().is_some());
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(
+        plain.contains("✓ Scan CLI — 12 files"),
+        "done row: {plain:?}"
+    );
+    assert!(
+        !plain.contains("Scan CLI ⎿") && !plain.contains("subagent("),
+        "cards held until the batch settles: {plain:?}"
+    );
+
+    // All resolved → the batch is over: rows gone, cards render.
+    app.apply_agent_tool_update("1".to_string(), None, Some("ok".to_string()), false);
+    app.apply_agent_tool_update("2".to_string(), None, Some("ok".to_string()), true);
+    assert_ne!(app.desired_status(), "running 3 sub-agents (3 done)");
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(!plain.contains("↳ "), "live rows cleared: {plain:?}");
+    assert!(plain.contains("Audit auth"), "cards render: {plain:?}");
+}
+
+#[test]
+fn test_cursor_task_notice_renames_generic_batch_rows() {
+    // A `cursor/task` notice arrives as an args-only AgentToolUpdate.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.sending = true;
+    for id in ["1", "2"] {
+        app.apply_agent_tool_call(
+            Some(id.to_string()),
+            "subagent".to_string(),
+            serde_json::json!({"label": "Subagent task"}),
+            vec![],
+            None,
+        );
+    }
+    app.apply_agent_tool_update(
+        "2".to_string(),
+        Some(serde_json::json!({"label": "Audit the auth flow", "agent": "explore"})),
+        None,
+        false,
+    );
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(
+        plain.contains("↳ explore — Audit the auth flow"),
+        "row renamed by the notice: {plain:?}"
+    );
+    assert!(
+        plain.contains("↳ Subagent task"),
+        "sibling untouched: {plain:?}"
+    );
+    // Enrichment also refreshes the one-line status label.
+    assert_eq!(
+        app.current_action_label().as_deref(),
+        Some("delegating: Audit the auth flow")
+    );
+}
+
+#[test]
+fn test_parallel_bridged_batch_mixed_tools_noun() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.sending = true;
+    for (id, name, args) in [
+        ("1", "grep", serde_json::json!({"pattern": "hover"})),
+        ("2", "subagent", serde_json::json!({"label": "Audit"})),
+    ] {
+        app.apply_agent_tool_call(Some(id.to_string()), name.to_string(), args, vec![], None);
+    }
+    assert_eq!(app.desired_status(), "running 2 parallel steps (0 done)");
+}
+
+#[test]
 fn test_status_tail_shows_turn_output_tokens() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);

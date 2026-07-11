@@ -1166,7 +1166,41 @@ impl CodeTuiApp {
             ask_question: Some(self.cursor_ask_question_prompt()),
             update_todos: Some(self.cursor_todos_sink()),
             create_plan: Some(self.cursor_plan_prompt()),
+            task: Some(self.cursor_task_sink()),
         }
+    }
+
+    /// `cursor/task`: enrich the matching call entry with the real task
+    /// description the generic `Task: Subagent task` title lacks.
+    fn cursor_task_sink(&self) -> cursor_acp::CursorTaskSink {
+        let tx = self.tx.clone();
+        std::sync::Arc::new(move |notice: cursor_acp::CursorTaskNotice| {
+            if notice.tool_call_id.is_empty()
+                || (notice.description.is_empty() && notice.prompt.is_empty())
+            {
+                return;
+            }
+            let mut args = serde_json::Map::new();
+            if !notice.description.is_empty() {
+                args.insert("label".into(), notice.description.into());
+            }
+            if !notice.prompt.is_empty() {
+                args.insert("task".into(), notice.prompt.into());
+            }
+            // Attribute specialists (`explore — <task>`); default types are noise.
+            if !matches!(
+                notice.subagent_type.as_str(),
+                "" | "unspecified" | "generalPurpose"
+            ) {
+                args.insert("agent".into(), notice.subagent_type.into());
+            }
+            let _ = tx.send(RuntimeEvent::AgentToolUpdate {
+                id: notice.tool_call_id,
+                args: Some(serde_json::Value::Object(args)),
+                result: None,
+                failed: false,
+            });
+        })
     }
 
     /// `cursor/create_plan`: render the plan as markdown, reuse the
