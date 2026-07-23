@@ -792,11 +792,9 @@ async fn link_or_default(
 /// prompts, themes, git- and npm-sourced packages, mcp.json) into the
 /// temp dir. Dirs are pre-created so a first-time `pi install <pkg>`
 /// lands in the real home instead of vanishing with the temp dir.
-/// `mcp.json` goes through the same symlink → hard-link → copy chain as
-/// the other linked files so MCP servers stay reachable on Windows
-/// without Developer Mode. On Windows without Developer Mode dir
-/// symlinks fail; in-session writes to those dirs are then lost — same
-/// gap as `codex_home_shadow`.
+/// `mcp.json` goes through the same symlink → hard-link → copy chain as the
+/// other linked files; dirs use a junction (see `symlink_util`) so both persist
+/// writes on Windows without Developer Mode.
 async fn link_pi_agent_state(real_agent: &Path, dest: &Path) {
     // Add new pi state dirs here as they appear. `bin/`, `sessions/`,
     // `models.json` are absent on purpose (each handled specially).
@@ -898,10 +896,11 @@ async fn link_pi_sessions_dir(
 
 #[cfg(not(unix))]
 async fn link_pi_sessions_dir(
-    _real_sessions: &std::path::Path,
-    _temp_sessions: &std::path::Path,
+    real_sessions: &std::path::Path,
+    temp_sessions: &std::path::Path,
 ) -> bool {
-    false
+    // Windows: junction it in (write-through). Non-unix/windows Errs → copy fallback.
+    symlink_dir(real_sessions, temp_sessions).await.is_ok()
 }
 
 async fn pi_sessions_share_storage(

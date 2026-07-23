@@ -467,8 +467,9 @@ fn finalize_killed(job: &mut Job) {
 fn first_kill_signal(job: &Job) {
     #[cfg(unix)]
     signal_group(job.pgid, libc::SIGTERM);
+    // Detached: runs under the jobs mutex; must not block the runtime.
     #[cfg(windows)]
-    let _ = taskkill_tree(job.pid);
+    taskkill_tree_detached(job.pid);
 }
 
 fn hard_kill_signal(job: &mut Job) {
@@ -491,7 +492,19 @@ pub(crate) fn signal_group(pgid: i32, sig: i32) {
     }
 }
 
-/// `child.kill()` would orphan grandchildren (`npm run dev` → `node`); `/T` kills the tree.
+/// `/T` kills the whole tree (`child.kill()` orphans grandchildren); detached so
+/// it never blocks the caller.
+#[cfg(windows)]
+pub(crate) fn taskkill_tree_detached(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Blocking variant; reports whether `taskkill` ran so the hard kill can fall
+/// back to `child.kill()`.
 #[cfg(windows)]
 pub(crate) fn taskkill_tree(pid: u32) -> bool {
     std::process::Command::new("taskkill")

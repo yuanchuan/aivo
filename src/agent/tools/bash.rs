@@ -239,25 +239,29 @@ pub(crate) fn interactive_block_reason(command: &str) -> Option<InteractiveBlock
     None
 }
 
-/// SIGKILLs the child's whole process group on drop unless disarmed.
-#[cfg(unix)]
-pub(super) struct GroupKillGuard(Option<i32>);
+/// Tree-kills the child on drop unless disarmed — covers timeout, wait error,
+/// and Esc-cancel. `kill_on_drop` alone would orphan grandchildren.
+pub(super) struct GroupKillGuard(Option<u32>);
 
-#[cfg(unix)]
 impl GroupKillGuard {
     fn new(pid: Option<u32>) -> Self {
-        Self(pid.map(|p| p as i32))
+        Self(pid)
     }
     fn disarm(&mut self) {
         self.0 = None;
     }
 }
 
-#[cfg(unix)]
 impl Drop for GroupKillGuard {
     fn drop(&mut self) {
-        if let Some(pgid) = self.0 {
-            crate::agent::jobs::signal_group(pgid, libc::SIGKILL);
+        if let Some(pid) = self.0 {
+            // Child leads its own group, so pid == pgid.
+            #[cfg(unix)]
+            crate::agent::jobs::signal_group(pid as i32, libc::SIGKILL);
+            #[cfg(windows)]
+            crate::agent::jobs::taskkill_tree_detached(pid);
+            #[cfg(not(any(unix, windows)))]
+            let _ = pid;
         }
     }
 }
@@ -348,12 +352,7 @@ pub(super) async fn run_bash_inner(
         Ok(c) => c,
         Err(e) => return early(Err(format!("spawn shell: {e}"))),
     };
-    // `kill_on_drop` reaches only the direct child; the guard tree-kills on
-    // timeout, wait error, or cancellation (Esc interrupt drops this future).
-    #[cfg(unix)]
     let mut tree_kill = GroupKillGuard::new(child.id());
-    #[cfg(windows)]
-    let pid = child.id();
     // Drain pipes concurrently with the wait — no deadlock on a full pipe.
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -370,10 +369,7 @@ pub(super) async fn run_bash_inner(
             Ok((Ok(status), out_bytes, err_bytes)) => (status, out_bytes, err_bytes),
             Ok((Err(e), ..)) => return early(Err(format!("run command: {e}"))),
             Err(_) => {
-                #[cfg(windows)]
-                if let Some(pid) = pid {
-                    let _ = crate::agent::jobs::taskkill_tree(pid);
-                }
+                // `tree_kill` fires on the early return below, killing the subtree.
                 return early(Err(format!(
                     "command timed out after {timeout}s and was killed. If it was waiting on \
                      interactive input (a password, prompt, or editor), a REPL, or a \
@@ -386,7 +382,6 @@ pub(super) async fn run_bash_inner(
             }
         };
     // Completed normally: leave deliberately-detached survivors alone.
-    #[cfg(unix)]
     tree_kill.disarm();
     let mut out = String::new();
     let stdout = String::from_utf8_lossy(&out_bytes);
@@ -438,6 +433,44 @@ confinement for the whole session, relaunch aivo with AIVO_AGENT_NO_SANDBOX=1.]"
     BashOutcome {
         result: Ok(result),
         sandbox_blocked,
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn disarm_clears_the_armed_pid() {
+        let mut g = GroupKillGuard::new(Some(1234));
+        assert_eq!(g.0, Some(1234));
+        g.disarm();
+        assert_eq!(g.0, None, "disarm must clear the pid");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn guard_tree_kills_child_on_drop() {
+        let child = tokio::process::Command::new("cmd")
+            .args(["/C", "ping", "-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id().expect("child pid");
+        assert!(crate::services::system_env::is_pid_alive(pid));
+        drop(GroupKillGuard::new(Some(pid)));
+        // Detached taskkill is async; poll for death rather than fixed-sleeping.
+        let mut dead = false;
+        for _ in 0..50 {
+            if !crate::services::system_env::is_pid_alive(pid) {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(dead, "guard drop must tree-kill the child");
+        let _ = child;
     }
 }
 

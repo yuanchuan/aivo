@@ -81,7 +81,10 @@ reflink-copy = "0.1"
 landlock = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_IO", "Win32_System_Threading", "Win32_Security_Credentials"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_IO", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials"] }
+# Directory junctions (no-privilege reparse points) for the codex/gemini/pi home
+# shadows; plain symlinks need Developer Mode. See src/services/symlink_util.rs.
+junction = "2"
 
 
 [features]

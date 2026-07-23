@@ -124,13 +124,34 @@ pub fn current_profile() -> SandboxProfile {
     SandboxProfile::Workspace
 }
 
-/// A user-facing note when this platform can't confine writes (no
-/// seatbelt/Landlock equivalent); `None` where a sandbox backend exists.
+/// A note when this platform can't confine writes; `None` where a sandbox
+/// backend exists or the user opted out (`Off`). Windows enforces no profile,
+/// so it warns — more sharply for `read-only`/`strict` (network too).
 pub fn confinement_notice() -> Option<&'static str> {
-    cfg!(windows).then_some(
-        "Windows: shell writes are not sandbox-confined — the destructive-command \
+    confinement_notice_for(current_profile())
+}
+
+/// Split from `confinement_notice` so the mapping is testable without the global.
+fn confinement_notice_for(profile: SandboxProfile) -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        match profile {
+            SandboxProfile::Off => None,
+            SandboxProfile::Workspace => Some(
+                "Windows: shell writes are not sandbox-confined — the destructive-command \
 confirm is the only write guard",
-    )
+            ),
+            SandboxProfile::ReadOnly | SandboxProfile::Strict => Some(
+                "Windows: --sandbox is not enforced — the shell can write anywhere and reach \
+the network; the destructive-command confirm is the only write guard",
+            ),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = profile;
+        None
+    }
 }
 
 /// Set by `run::run` in the real CLI binary to signal that this process
@@ -846,5 +867,29 @@ mod shell_tests {
         assert!(SandboxProfile::Strict.deny_network());
         assert!(!SandboxProfile::Workspace.deny_network());
         assert!(!SandboxProfile::Off.deny_network());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn confinement_notice_is_profile_aware_on_windows() {
+        assert!(confinement_notice_for(SandboxProfile::Off).is_none());
+        assert!(confinement_notice_for(SandboxProfile::Workspace).is_some());
+        assert!(
+            confinement_notice_for(SandboxProfile::ReadOnly)
+                .unwrap()
+                .contains("network")
+        );
+        assert!(
+            confinement_notice_for(SandboxProfile::Strict)
+                .unwrap()
+                .contains("network")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn confinement_notice_is_silent_off_windows() {
+        assert!(confinement_notice_for(SandboxProfile::Strict).is_none());
+        assert!(confinement_notice_for(SandboxProfile::Off).is_none());
     }
 }

@@ -76,7 +76,55 @@ pub(crate) fn ensure_private_dir_blocking(dir: &Path) -> Result<()> {
                 .with_context(|| format!("Failed to set 0700 on {:?}", dir))?;
         }
     }
+    #[cfg(windows)]
+    harden_dir_acl_windows(dir);
     Ok(())
+}
+
+/// Windows analogue of the `0700` tightening: a protected owner-only DACL.
+/// Best-effort — never block a config write on ACL failure.
+#[cfg(windows)]
+fn harden_dir_acl_windows(dir: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+    };
+
+    // Protected, inheritable (OICI) Full-access DACL for owner/Admins/SYSTEM only.
+    let sddl: Vec<u16> = "D:PAI(A;OICI;FA;;;OW)(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)\0"
+        .encode_utf16()
+        .collect();
+    let mut psd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated UTF-16; `psd` receives a LocalAlloc'd SD freed below.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut psd,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 || psd.is_null() {
+        return;
+    }
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is NUL-terminated; `psd` is the valid SD from above.
+    unsafe {
+        SetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            psd,
+        );
+        LocalFree(psd);
+    }
 }
 
 pub(crate) async fn ensure_private_dir(dir: &Path) -> Result<()> {
@@ -160,5 +208,34 @@ mod tests {
         atomic_write_secure_blocking(&target, b"x").unwrap();
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_dir_gets_protected_owner_only_acl() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("secrets");
+        ensure_private_dir_blocking(&target).unwrap();
+
+        let out = std::process::Command::new("icacls")
+            .arg(&target)
+            .output()
+            .expect("run icacls");
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Our grant landed (guards fail-open) and inherited "(I)" ACEs were stripped.
+        assert!(text.contains("(F)"), "expected Full-control ACEs:\n{text}");
+        assert!(!text.contains("(I)"), "expected no inherited ACEs:\n{text}");
+        assert!(
+            !text.contains("Everyone"),
+            "unexpected Everyone ACE:\n{text}"
+        );
+        assert!(
+            !text.contains("Authenticated Users"),
+            "unexpected Authenticated Users ACE:\n{text}"
+        );
+        assert!(
+            !text.contains("BUILTIN\\Users"),
+            "unexpected Users ACE:\n{text}"
+        );
     }
 }

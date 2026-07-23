@@ -124,10 +124,20 @@ fn prompt_before_browser_open() {
     let _ = std::io::stdin().lock().read_line(&mut buf);
 }
 
+/// Resolve to a spawnable path so Windows finds npm's `claude.cmd` shim
+/// (`CreateProcess` only auto-appends `.exe`); bare-name fallback preserves
+/// the `ClaudeNotFound` path.
+fn resolve_program(binary: &str, dirs: &[std::path::PathBuf]) -> std::ffi::OsString {
+    crate::services::path_search::find_in_dirs(binary, dirs)
+        .map(|p| p.into_os_string())
+        .unwrap_or_else(|| binary.into())
+}
+
 async fn spawn_setup_token_with_binary(
     binary: &str,
 ) -> Result<ClaudeOAuthCredential, SetupTokenError> {
-    let mut cmd = Command::new(binary);
+    let program = resolve_program(binary, &crate::services::path_search::collect_path_dirs());
+    let mut cmd = Command::new(program);
     cmd.arg("setup-token")
         .stdin(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -358,5 +368,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SetupTokenError::EmptyOutput));
+    }
+
+    #[test]
+    fn resolve_program_falls_back_to_bare_name_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = resolve_program("claude", &[dir.path().to_path_buf()]);
+        assert_eq!(got, std::ffi::OsString::from("claude"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_program_prefers_cmd_shim_on_windows() {
+        // CreateProcess can only spawn the `.cmd`, not npm's extensionless shim.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("claude"), "bash shim").unwrap();
+        let cmd = dir.path().join("claude.cmd");
+        std::fs::write(&cmd, "@echo off\r\n").unwrap();
+        let got = resolve_program("claude", &[dir.path().to_path_buf()]);
+        // PATHEXT casing varies by runner; compare case-folded.
+        assert_eq!(
+            std::path::Path::new(&got).to_string_lossy().to_lowercase(),
+            cmd.to_string_lossy().to_lowercase(),
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn spawn_extracts_token_from_cmd_stub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = tmp.path().join("claude-stub.cmd");
+        std::fs::write(&stub, "@echo off\r\necho sk-ant-oat01-abcdefghijklmnop\r\n").unwrap();
+        let cred = spawn_setup_token_with_binary_for_test(&stub).await.unwrap();
+        assert_eq!(cred.token, "sk-ant-oat01-abcdefghijklmnop");
     }
 }
