@@ -10,9 +10,13 @@ rustflags = ["-C", "target-feature=+crt-static"]
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
-# Strip unused SQLite extensions from the bundled libsqlite3-sys build. aivo's
+# Strip unused SQLite surface from the bundled libsqlite3-sys build. aivo's
 # SQL is plain tables + json_extract (JSON1 stays); the only external DB it
 # opens is OpenCode's, which has no virtual tables. libsqlite3-sys appends
-# these after its own -D flags, so the -U undefines win.
+# these after its own -D flags, so the -U undefines win. The OMITs drop whole
+# subsystems aivo never touches (UTF-16 APIs, blobs, authorizers, progress
+# callbacks, shared cache); rusqlite's dead bindings to them are GC'd at link,
+# which the full test suite exercises on every platform. Grammar-level OMITs
+# (EXPLAIN, WINDOWFUNC) don't compile against the amalgamation's canned parser.
 [env]
-LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_ENABLE_MEMORY_MANAGEMENT -USQLITE_SOUNDEX"
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_FTS5 -USQLITE_ENABLE_RTREE -USQLITE_ENABLE_STAT4 -USQLITE_ENABLE_DBSTAT_VTAB -USQLITE_ENABLE_MEMORY_MANAGEMENT -USQLITE_SOUNDEX -USQLITE_ENABLE_COLUMN_METADATA -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_UTF16 -DSQLITE_OMIT_INCRBLOB -DSQLITE_OMIT_AUTHORIZATION -DSQLITE_OMIT_COMPILEOPTION_DIAGS -DSQLITE_OMIT_TCL_VARIABLE -DSQLITE_UNTESTABLE -DSQLITE_OMIT_DECLTYPE -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_GET_TABLE -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_MAX_EXPR_DEPTH=0"
