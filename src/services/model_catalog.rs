@@ -1014,7 +1014,10 @@ pub(crate) async fn fetch_models_detailed_filtered(
                 None => anyhow::bail!("{}", last_err),
             }
         }
-    }?;
+    }?
+    .into_iter()
+    .filter(|m| !m.id.is_empty())
+    .collect();
 
     Ok(if chat_only {
         raw.into_iter()
