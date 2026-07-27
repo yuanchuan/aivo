@@ -27,6 +27,9 @@ allow = [
     # webpki-roots ships the Mozilla CA bundle under this Linux Foundation data
     # license; redistribution is compatible with our MIT release.
     "CDLA-Permissive-2.0",
+    # jpeg-encoder is (MIT OR Apache-2.0) AND IJG; the Independent JPEG Group
+    # license is FSF-free and permissive — fine to redistribute under our MIT.
+    "IJG",
     "ISC",
     "MIT",
     "MPL-2.0",
