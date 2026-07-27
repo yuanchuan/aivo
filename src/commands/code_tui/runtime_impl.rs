@@ -474,13 +474,12 @@ impl CodeTuiApp {
         } else if route_agent {
             self.spawn_agent_turn(input, attachments, vision_shim).await;
         } else {
-            if self.agent_capable() && !attachments.is_empty() {
-                let msg = if all_images {
-                    "Image sent as plain chat — this model isn't confirmed vision-capable for the agent"
-                } else {
+            if self.agent_capable() && !attachments.is_empty() && !all_images {
+                self.notice = Some((
+                    MUTED(),
                     "Attachment sent as plain chat — agent tools are off for this message"
-                };
-                self.notice = Some((MUTED(), msg.to_string()));
+                        .to_string(),
+                ));
             }
             // Plain chat's finish path never auto-continues — a goal falling back
             // here would strand the loop, so disarm it and say why.

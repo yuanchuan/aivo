@@ -1514,12 +1514,13 @@ pub fn is_document_mime(mime: &str) -> bool {
 }
 
 async fn materialize_attachment(attachment: &MessageAttachment) -> Result<MessageAttachment> {
+    if attachment.is_image() {
+        return materialize_image_attachment(attachment).await;
+    }
     match &attachment.storage {
         AttachmentStorage::Inline { .. } => Ok(attachment.clone()),
         AttachmentStorage::FileRef { path } => {
-            let is_image = attachment.is_image();
-            let is_document = is_document_mime(&attachment.mime_type);
-            let storage = if is_image || is_document {
+            let storage = if is_document_mime(&attachment.mime_type) {
                 let bytes = tokio::fs::read(path)
                     .await
                     .map_err(|err| anyhow::anyhow!("Failed to read '{}': {err}", path))?;
@@ -1543,6 +1544,37 @@ async fn materialize_attachment(attachment: &MessageAttachment) -> Result<Messag
             })
         }
     }
+}
+
+async fn materialize_image_attachment(attachment: &MessageAttachment) -> Result<MessageAttachment> {
+    use crate::services::image_optimize::{optimize_base64, optimize_image};
+    let mime = attachment.mime_type.clone();
+    let task = match &attachment.storage {
+        AttachmentStorage::Inline { data } => {
+            let data = data.clone();
+            tokio::task::spawn_blocking(move || match optimize_base64(&data) {
+                Some((mime_type, data)) => (mime_type, data),
+                None => (mime, data),
+            })
+        }
+        AttachmentStorage::FileRef { path } => {
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|err| anyhow::anyhow!("Failed to read '{}': {err}", path))?;
+            tokio::task::spawn_blocking(move || match optimize_image(&bytes) {
+                Some(image) => (image.mime_type, BASE64.encode(image.bytes)),
+                None => (mime, BASE64.encode(bytes)),
+            })
+        }
+    };
+    let (mime_type, data) = task
+        .await
+        .map_err(|err| anyhow::anyhow!("image processing failed: {err}"))?;
+    Ok(MessageAttachment {
+        name: attachment.name.clone(),
+        mime_type,
+        storage: AttachmentStorage::Inline { data },
+    })
 }
 
 /// Returns `(stored_messages, title, preview)` for a completed one-shot
@@ -3463,5 +3495,67 @@ data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"tex
         key.base_url = crate::services::cursor_acp::CURSOR_ACP_SENTINEL.to_string();
         assert!(key.is_cursor_acp());
         assert!(chat_route_to_persist(&key, "gpt-oss", &ChatFormat::OpenAI).is_none());
+    }
+
+    fn noisy_png_base64() -> (String, usize) {
+        let png = crate::services::image_optimize::test_noise_png(1400, 1400);
+        assert!(png.len() > crate::services::image_optimize::BYTE_BUDGET);
+        let len = png.len();
+        (BASE64.encode(png), len)
+    }
+
+    #[tokio::test]
+    async fn materialize_optimizes_inline_clipboard_image() {
+        let (data, original_len) = noisy_png_base64();
+        let attachment = MessageAttachment {
+            name: "clipboard-test.png".to_string(),
+            mime_type: "image/png".to_string(),
+            storage: AttachmentStorage::Inline { data },
+        };
+        let out = materialize_attachment(&attachment).await.unwrap();
+        assert_eq!(out.mime_type, "image/jpeg");
+        let AttachmentStorage::Inline { data } = &out.storage else {
+            panic!("expected inline storage");
+        };
+        assert!(BASE64.decode(data).unwrap().len() < original_len);
+    }
+
+    #[tokio::test]
+    async fn materialize_optimizes_file_ref_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        let (data, original_len) = noisy_png_base64();
+        std::fs::write(&path, BASE64.decode(data).unwrap()).unwrap();
+        let attachment = MessageAttachment {
+            name: "shot.png".to_string(),
+            mime_type: "image/png".to_string(),
+            storage: AttachmentStorage::FileRef {
+                path: path.to_string_lossy().into_owned(),
+            },
+        };
+        let out = materialize_attachment(&attachment).await.unwrap();
+        assert_eq!(out.mime_type, "image/jpeg");
+        let AttachmentStorage::Inline { data } = &out.storage else {
+            panic!("expected inline storage");
+        };
+        assert!(BASE64.decode(data).unwrap().len() < original_len);
+    }
+
+    #[tokio::test]
+    async fn materialize_keeps_small_inline_image_verbatim() {
+        let pixel_png = crate::services::image_optimize::test_tiny_png();
+        let attachment = MessageAttachment {
+            name: "dot.png".to_string(),
+            mime_type: "image/png".to_string(),
+            storage: AttachmentStorage::Inline {
+                data: BASE64.encode(&pixel_png),
+            },
+        };
+        let out = materialize_attachment(&attachment).await.unwrap();
+        assert_eq!(out.mime_type, "image/png");
+        let AttachmentStorage::Inline { data } = &out.storage else {
+            panic!("expected inline storage");
+        };
+        assert_eq!(BASE64.decode(data).unwrap(), pixel_png);
     }
 }

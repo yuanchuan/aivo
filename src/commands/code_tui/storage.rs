@@ -64,26 +64,23 @@ pub(super) async fn load_or_import_resume_session(
                 state,
                 source_newer,
             } => {
-                let mut loaded = LoadedSession::from_state(state);
+                let mut loaded = build_loaded(move || LoadedSession::from_state(state)).await?;
                 loaded.source_newer = source_newer;
                 Ok(loaded)
             }
             // First open → reconstructed in memory; the turn-save persists it.
-            ForeignResume::Fresh(transcript) => Ok(LoadedSession {
-                key_id: key_id.to_string(),
-                session_id: crate::services::session_import::import_session_id(
+            ForeignResume::Fresh(transcript) => {
+                let key_id = key_id.to_string();
+                let session_id = crate::services::session_import::import_session_id(
                     &origin.cli,
                     &origin.foreign_id,
-                ),
-                raw_model: model.to_string(),
-                messages: to_chat_messages(transcript.messages),
-                engine_messages: Some(transcript.engine_messages),
-                pristine_import: true,
-                source_newer: false,
-                import_fidelity: Some(transcript.fidelity),
-                plan_state: None,
-                image_descriptions: None,
-            }),
+                );
+                let model = model.to_string();
+                build_loaded(move || {
+                    LoadedSession::from_import(key_id, session_id, model, transcript)
+                })
+                .await
+            }
         };
     }
     load_resume_session(session_store, preview).await
@@ -99,7 +96,16 @@ pub(super) async fn load_resume_session(
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Saved session is no longer available".to_string())?;
 
-    Ok(LoadedSession::from_state(session))
+    build_loaded(move || LoadedSession::from_state(session)).await
+}
+
+/// Uses the blocking pool because history image normalization is CPU-bound.
+async fn build_loaded(
+    build: impl FnOnce() -> LoadedSession + Send + 'static,
+) -> std::result::Result<LoadedSession, String> {
+    tokio::task::spawn_blocking(build)
+        .await
+        .map_err(|err| format!("Failed to load session: {err}"))
 }
 
 /// Preview for the highlighted `/resume` row. A foreign (not-yet-imported)

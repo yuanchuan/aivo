@@ -6,12 +6,14 @@ use crate::services::session_store::VisionFallbackMode;
 use crate::services::vision_describe::DESCRIBE_EXHAUSTED;
 
 fn image_attachment() -> MessageAttachment {
+    image_attachment_with("iVBOR".to_string())
+}
+
+fn image_attachment_with(data: String) -> MessageAttachment {
     MessageAttachment {
         name: "shot.png".to_string(),
         mime_type: "image/png".to_string(),
-        storage: AttachmentStorage::Inline {
-            data: "iVBOR".to_string(),
-        },
+        storage: AttachmentStorage::Inline { data },
     }
 }
 
@@ -718,4 +720,93 @@ async fn describe_failed_restores_composer_and_resets_turn() {
     assert_eq!(app.draft, "what's in this", "draft text restored");
     assert_eq!(app.draft_attachments.len(), 1, "attachment restored");
     assert!(notice_text(&app).contains("temporarily down"));
+}
+
+fn image_history_session(b64: String) -> LoadedSession {
+    LoadedSession {
+        key_id: "k".to_string(),
+        session_id: "s".to_string(),
+        raw_model: "m".to_string(),
+        messages: vec![ChatMessage {
+            model: None,
+            role: "user".to_string(),
+            content: "look".to_string(),
+            reasoning_content: None,
+            attachments: vec![image_attachment_with(b64)],
+        }],
+        engine_messages: None,
+        pristine_import: false,
+        source_newer: false,
+        import_fidelity: None,
+        plan_state: None,
+        image_descriptions: None,
+    }
+}
+
+#[test]
+fn resume_load_normalizes_oversized_history_images() {
+    use crate::services::vision_describe::image_hash;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let big_b64 = BASE64.encode(crate::services::image_optimize::test_noise_png(1100, 1100));
+    let mut session = image_history_session(big_b64.clone());
+    session.engine_messages = Some(vec![serde_json::json!({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{big_b64}")}},
+        ],
+    })]);
+    session.image_descriptions = Some(std::collections::HashMap::from([(
+        image_hash(&big_b64),
+        "[Image] a login form".to_string(),
+    )]));
+
+    session.normalize_history_images();
+
+    let attachment = &session.messages[0].attachments[0];
+    assert_eq!(attachment.mime_type, "image/jpeg");
+    let AttachmentStorage::Inline { data } = &attachment.storage else {
+        panic!("expected inline storage");
+    };
+    assert!(data.len() < big_b64.len(), "attachment should shrink");
+
+    let engine = session.engine_messages.as_ref().unwrap();
+    let url = engine[0]["content"][1]["image_url"]["url"]
+        .as_str()
+        .unwrap();
+    assert!(
+        url.starts_with("data:image/jpeg;base64,"),
+        "engine image rewritten"
+    );
+    assert!(url.len() < big_b64.len(), "engine image should shrink");
+    let new_b64 = url.strip_prefix("data:image/jpeg;base64,").unwrap();
+    assert_eq!(new_b64, data, "attachment and engine rewrites agree");
+
+    let descriptions = session.image_descriptions.as_ref().unwrap();
+    assert_eq!(
+        descriptions.get(&image_hash(new_b64)).map(String::as_str),
+        Some("[Image] a login form")
+    );
+    assert!(
+        !descriptions.contains_key(&image_hash(&big_b64)),
+        "stale hash entry removed"
+    );
+}
+
+#[test]
+fn resume_load_keeps_small_history_images_verbatim() {
+    let tiny_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .encode(crate::services::image_optimize::test_tiny_png())
+    };
+    let mut session = image_history_session(tiny_b64.clone());
+    session.normalize_history_images();
+    let AttachmentStorage::Inline { data } = &session.messages[0].attachments[0].storage else {
+        panic!("expected inline storage");
+    };
+    assert_eq!(data, &tiny_b64, "small image untouched");
+    assert_eq!(session.messages[0].attachments[0].mime_type, "image/png");
 }

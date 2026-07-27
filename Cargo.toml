@@ -55,6 +55,10 @@ zeroize = { version = "1.8", features = ["derive"] }
 # embedded public key (src/commands/update.rs). No signing on the client.
 minisign-verify = "0.2.5"
 
+png = "0.17"
+zune-jpeg = "0.4"
+jpeg-encoder = "0.6"
+
 # Utils
 bytes = "1"
 futures = { version = "0.3", default-features = false, features = ["std"] }

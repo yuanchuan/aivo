@@ -851,7 +851,7 @@ pub(super) struct LoadedSession {
 
 impl LoadedSession {
     pub(super) fn from_state(state: crate::services::session_store::CodeSessionState) -> Self {
-        Self {
+        let mut loaded = Self {
             key_id: state.key_id,
             session_id: state.session_id,
             raw_model: state.model,
@@ -862,6 +862,98 @@ impl LoadedSession {
             import_fidelity: state.import_fidelity,
             plan_state: state.plan_state,
             image_descriptions: state.image_descriptions,
+        };
+        loaded.normalize_history_images();
+        loaded
+    }
+
+    pub(super) fn from_import(
+        key_id: String,
+        session_id: String,
+        raw_model: String,
+        transcript: crate::services::session_import::ImportedTranscript,
+    ) -> Self {
+        let mut loaded = Self {
+            key_id,
+            session_id,
+            raw_model,
+            messages: to_chat_messages(transcript.messages),
+            engine_messages: Some(transcript.engine_messages),
+            pristine_import: true,
+            source_newer: false,
+            import_fidelity: Some(transcript.fidelity),
+            plan_state: None,
+            image_descriptions: None,
+        };
+        loaded.normalize_history_images();
+        loaded
+    }
+
+    /// Shrinks oversized images in persisted history and preserves describe-cache keys.
+    pub(super) fn normalize_history_images(&mut self) {
+        use crate::services::image_optimize::optimize_base64;
+        use crate::services::session_store::AttachmentStorage;
+        use crate::services::vision_describe::{image_hash, parse_data_url};
+
+        let mut rewritten: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
+
+        for message in &mut self.messages {
+            for attachment in &mut message.attachments {
+                if !attachment.is_image() {
+                    continue;
+                }
+                let AttachmentStorage::Inline { data } = &mut attachment.storage else {
+                    continue;
+                };
+                let (mime, new_b64) = match rewritten.get(data.as_str()) {
+                    Some(hit) => hit.clone(),
+                    None => match optimize_base64(data) {
+                        Some(new) => new,
+                        None => continue,
+                    },
+                };
+                let old = std::mem::replace(data, new_b64.clone());
+                attachment.mime_type = mime.clone();
+                rewritten.insert(old, (mime, new_b64));
+            }
+        }
+
+        for message in self.engine_messages.iter_mut().flatten() {
+            let Some(serde_json::Value::Array(parts)) = message.get_mut("content") else {
+                continue;
+            };
+            for part in parts
+                .iter_mut()
+                .filter(|p| crate::agent::tokens::is_image_part(p))
+            {
+                let Some((_, b64)) = part["image_url"]["url"].as_str().and_then(parse_data_url)
+                else {
+                    continue;
+                };
+                let (mime, new_b64) = match rewritten.get(b64) {
+                    Some(hit) => hit.clone(),
+                    None => match optimize_base64(b64) {
+                        Some(new) => new,
+                        None => continue,
+                    },
+                };
+                let old = b64.to_string();
+                part["image_url"]["url"] =
+                    serde_json::Value::String(format!("data:{mime};base64,{new_b64}"));
+                rewritten.insert(old, (mime, new_b64));
+            }
+        }
+
+        // Preserve cached descriptions after changing the hashed image data.
+        if let Some(descriptions) = self.image_descriptions.as_mut()
+            && !descriptions.is_empty()
+        {
+            for (old_b64, (_, new_b64)) in &rewritten {
+                if let Some(text) = descriptions.remove(&image_hash(old_b64)) {
+                    descriptions.insert(image_hash(new_b64), text);
+                }
+            }
         }
     }
 }
