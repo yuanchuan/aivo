@@ -66,19 +66,19 @@ fn sniff_format(bytes: &[u8]) -> Option<SniffedFormat> {
 
 /// Reads dimensions before allocating a decoded pixel buffer.
 fn probe_dimensions(bytes: &[u8], format: SniffedFormat) -> Option<(u32, u32)> {
-    match format {
+    let (w, h) = match format {
         SniffedFormat::Png => {
-            let reader = png::Decoder::new(bytes).read_info().ok()?;
-            let info = reader.info();
-            Some((info.width, info.height))
+            let mut decoder = zune_png::PngDecoder::new(bytes);
+            decoder.decode_headers().ok()?;
+            decoder.get_dimensions()?
         }
         SniffedFormat::Jpeg => {
             let mut decoder = zune_jpeg::JpegDecoder::new(bytes);
             decoder.decode_headers().ok()?;
-            let (w, h) = decoder.dimensions()?;
-            Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?))
+            decoder.dimensions()?
         }
-    }
+    };
+    Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?))
 }
 
 /// Flattens alpha onto white to keep transparent screenshots readable as JPEG.
@@ -91,18 +91,22 @@ fn decode_rgb(bytes: &[u8], format: SniffedFormat, width: u32, height: u32) -> O
 }
 
 fn decode_png_rgb(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut decoder = png::Decoder::new(bytes);
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).ok()?;
-    buf.truncate(info.buffer_size());
+    let mut decoder = zune_png::PngDecoder::new(bytes);
+    let buf = match decoder.decode().ok()? {
+        zune_core::result::DecodingResult::U8(buf) => buf,
+        // 16-bit: the high byte is the standard 16→8 reduction.
+        zune_core::result::DecodingResult::U16(buf) => {
+            buf.into_iter().map(|v| (v >> 8) as u8).collect()
+        }
+        _ => return None,
+    };
     let flatten = |value: u8, alpha: u8| -> u8 {
         ((u16::from(value) * u16::from(alpha) + 255 * (255 - u16::from(alpha))) / 255) as u8
     };
-    match info.color_type {
-        png::ColorType::Rgb => Some(buf),
-        png::ColorType::Rgba => Some(
+    // Palette images decode as RGB/RGBA (tRNS promotes to the alpha variant).
+    match decoder.get_colorspace()? {
+        zune_core::colorspace::ColorSpace::RGB => Some(buf),
+        zune_core::colorspace::ColorSpace::RGBA => Some(
             buf.chunks_exact(4)
                 .flat_map(|p| {
                     [
@@ -113,8 +117,10 @@ fn decode_png_rgb(bytes: &[u8]) -> Option<Vec<u8>> {
                 })
                 .collect(),
         ),
-        png::ColorType::Grayscale => Some(buf.iter().flat_map(|&g| [g, g, g]).collect()),
-        png::ColorType::GrayscaleAlpha => Some(
+        zune_core::colorspace::ColorSpace::Luma => {
+            Some(buf.iter().flat_map(|&g| [g, g, g]).collect())
+        }
+        zune_core::colorspace::ColorSpace::LumaA => Some(
             buf.chunks_exact(2)
                 .flat_map(|p| {
                     let g = flatten(p[0], p[1]);

@@ -55,8 +55,12 @@ zeroize = { version = "1.8", features = ["derive"] }
 # embedded public key (src/commands/update.rs). No signing on the client.
 minisign-verify = "0.2.5"
 
-png = "0.17"
-zune-jpeg = "0.4"
+# Image attachment normalization. Kept lean for the 10 MiB musl gate: zune-png
+# over `png` (shares zune-core, skips the flate2/miniz stack), and the x86 SIMD
+# fast paths off — decode is a once-per-attachment cost, size is the constraint.
+zune-png = { version = "0.4", default-features = false, features = ["std"] }
+zune-jpeg = { version = "0.4", default-features = false, features = ["std", "neon"] }
+zune-core = "0.4"
 jpeg-encoder = "0.6"
 
 # Utils
@@ -101,6 +105,8 @@ __internal_test_fast_crypto = []
 
 [dev-dependencies]
 ctor = "1.0.9"
+# Test-only PNG *encoder* for image_optimize fixtures; decode ships zune-png.
+png = "0.17"
 tempfile = "3.0"
 
 [profile.dev]
