@@ -3,15 +3,22 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::services::http_utils::sse_data_payload;
-use crate::services::responses_chat_conversion::ResponsesStreamConverter;
+use crate::services::responses_chat_conversion::{ResponsesStreamConverter, ToolNamespaceMap};
 use crate::services::responses_to_chat_router::convert_chat_response_to_responses_sse;
 
 pub(crate) fn convert_chat_response_to_responses_json(
     chat: &Value,
     original_model: &str,
     custom_tools: &HashSet<String>,
+    tool_namespaces: &ToolNamespaceMap,
 ) -> Result<Value> {
-    let sse = convert_chat_response_to_responses_sse(chat, false, original_model, custom_tools);
+    let sse = convert_chat_response_to_responses_sse(
+        chat,
+        false,
+        original_model,
+        custom_tools,
+        tool_namespaces,
+    );
     extract_completed_response_from_sse(&sse)
         .ok_or_else(|| anyhow::anyhow!("failed to synthesize responses JSON payload"))
 }
@@ -20,9 +27,11 @@ pub(crate) fn convert_chat_sse_to_responses_sse(
     chat_sse: &str,
     original_model: &str,
     custom_tools: &HashSet<String>,
+    tool_namespaces: &ToolNamespaceMap,
 ) -> Result<String> {
     let mut converter = ResponsesStreamConverter::new(original_model, false)
-        .with_custom_tools(custom_tools.clone());
+        .with_custom_tools(custom_tools.clone())
+        .with_tool_namespaces(tool_namespaces.clone());
     let mut output = converter.push_bytes(chat_sse.as_bytes())?;
     output.push_str(&converter.finish());
     Ok(output)
@@ -52,7 +61,7 @@ mod tests {
         convert_chat_response_to_responses_json, convert_chat_sse_to_responses_sse,
         extract_completed_response_from_sse,
     };
-    use crate::services::responses_chat_conversion::ResponsesStreamConverter;
+    use crate::services::responses_chat_conversion::{ResponsesStreamConverter, ToolNamespaceMap};
     use serde_json::json;
     use std::collections::HashSet;
 
@@ -69,8 +78,13 @@ mod tests {
             }]
         });
 
-        let response =
-            convert_chat_response_to_responses_json(&chat, "gpt-4o", &HashSet::new()).unwrap();
+        let response = convert_chat_response_to_responses_json(
+            &chat,
+            "gpt-4o",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(response["object"], "response");
         assert_eq!(response["model"], "gpt-4o");
@@ -106,8 +120,13 @@ mod tests {
             }]
         });
 
-        let response =
-            convert_chat_response_to_responses_json(&chat, "gpt-4o", &HashSet::new()).unwrap();
+        let response = convert_chat_response_to_responses_json(
+            &chat,
+            "gpt-4o",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(response["object"], "response");
         assert_eq!(response["output"][0]["type"], "function_call");
@@ -143,8 +162,13 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let responses_sse =
-            convert_chat_sse_to_responses_sse(chat_sse, "gpt-4o", &HashSet::new()).unwrap();
+        let responses_sse = convert_chat_sse_to_responses_sse(
+            chat_sse,
+            "gpt-4o",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
 
         assert!(responses_sse.contains("event: response.created"));
         assert!(responses_sse.contains("event: response.output_text.delta"));
@@ -161,8 +185,13 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let responses_sse =
-            convert_chat_sse_to_responses_sse(chat_sse, "grok-4.3", &HashSet::new()).unwrap();
+        let responses_sse = convert_chat_sse_to_responses_sse(
+            chat_sse,
+            "grok-4.3",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
         let response = extract_completed_response_from_sse(&responses_sse).unwrap();
 
         assert_eq!(response["usage"]["input_tokens"], 15000);
@@ -179,8 +208,13 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let responses_sse =
-            convert_chat_sse_to_responses_sse(chat_sse, "grok-4.3", &HashSet::new()).unwrap();
+        let responses_sse = convert_chat_sse_to_responses_sse(
+            chat_sse,
+            "grok-4.3",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
         let response = extract_completed_response_from_sse(&responses_sse).unwrap();
 
         assert_eq!(response["usage"]["input_tokens"], 15000);
@@ -197,8 +231,13 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let responses_sse =
-            convert_chat_sse_to_responses_sse(chat_sse, "gpt-4o", &HashSet::new()).unwrap();
+        let responses_sse = convert_chat_sse_to_responses_sse(
+            chat_sse,
+            "gpt-4o",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
 
         assert!(responses_sse.contains("event: response.output_item.added"));
         assert!(responses_sse.contains("event: response.function_call_arguments.delta"));
@@ -217,9 +256,13 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let responses_sse =
-            convert_chat_sse_to_responses_sse(chat_sse, "deepseek-reasoner", &HashSet::new())
-                .unwrap();
+        let responses_sse = convert_chat_sse_to_responses_sse(
+            chat_sse,
+            "deepseek-reasoner",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
 
         assert!(responses_sse.contains("event: response.reasoning_summary_text.delta"));
         assert!(responses_sse.contains("\"delta\":\"thinking...\""));
@@ -235,8 +278,13 @@ mod tests {
             "data: [DONE]\n\n",
         );
 
-        let responses_sse =
-            convert_chat_sse_to_responses_sse(chat_sse, "gpt-4o", &HashSet::new()).unwrap();
+        let responses_sse = convert_chat_sse_to_responses_sse(
+            chat_sse,
+            "gpt-4o",
+            &HashSet::new(),
+            &ToolNamespaceMap::new(),
+        )
+        .unwrap();
         let response = extract_completed_response_from_sse(&responses_sse).unwrap();
 
         assert_eq!(response["status"], "incomplete");

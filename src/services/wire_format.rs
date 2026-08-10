@@ -30,7 +30,7 @@ use crate::services::openai_gemini_bridge::{
 use crate::services::provider_protocol::ProviderProtocol;
 use crate::services::responses_chat_conversion::{
     ResponsesStreamConverter, ResponsesToChatConversionConfig, ResponsesToChatStreamConverter,
-    convert_chat_to_responses_request, convert_responses_json_to_chat,
+    ToolNamespaceMap, convert_chat_to_responses_request, convert_responses_json_to_chat,
     convert_responses_to_chat_request,
 };
 use crate::services::serve_responses::convert_chat_response_to_responses_json;
@@ -241,6 +241,7 @@ pub enum ResponseOptions<'a> {
     ResponsesToChat {
         model: &'a str,
         custom_tools: &'a HashSet<String>,
+        tool_namespaces: &'a ToolNamespaceMap,
     },
     GeminiToAnthropic {
         model: &'a str,
@@ -281,7 +282,8 @@ pub fn translate_response(resp: &Value, opts: &ResponseOptions) -> Result<Value>
         ResponseOptions::ResponsesToChat {
             model,
             custom_tools,
-        } => convert_chat_response_to_responses_json(resp, model, custom_tools),
+            tool_namespaces,
+        } => convert_chat_response_to_responses_json(resp, model, custom_tools, tool_namespaces),
         ResponseOptions::GeminiToAnthropic { model } => Ok(convert_gemini_to_anthropic_response(
             resp,
             &GeminiToAnthropicConfig { model },
@@ -404,6 +406,7 @@ pub enum StreamOptions<'a> {
         model: &'a str,
         requires_reasoning_content: bool,
         custom_tools: HashSet<String>,
+        tool_namespaces: ToolNamespaceMap,
     },
     GeminiToAnthropic {
         model: &'a str,
@@ -443,9 +446,11 @@ pub fn stream_adapter(opts: StreamOptions) -> Box<dyn StreamAdapter + Send> {
             model,
             requires_reasoning_content,
             custom_tools,
+            tool_namespaces,
         } => Box::new(
             ResponsesStreamConverter::new(model, requires_reasoning_content)
-                .with_custom_tools(custom_tools),
+                .with_custom_tools(custom_tools)
+                .with_tool_namespaces(tool_namespaces),
         ),
         StreamOptions::GeminiToAnthropic { model } => {
             Box::new(GeminiToAnthropicStreamConverter::new(model))
@@ -561,6 +566,7 @@ mod tests {
                 model: "test-model",
                 requires_reasoning_content: false,
                 custom_tools: HashSet::new(),
+                tool_namespaces: ToolNamespaceMap::new(),
             }),
             (Anthropic, Gemini) => Some(StreamOptions::GeminiToAnthropic {
                 model: "test-model",
@@ -681,6 +687,7 @@ mod tests {
         let anth_resp = anthropic_response_config();
         let resp_cfg = responses_router_config();
         let custom_tools = HashSet::new();
+        let tool_namespaces = ToolNamespaceMap::new();
 
         let request_opts = |c, u| -> Option<RequestOptions<'_>> {
             match (c, u) {
@@ -713,6 +720,7 @@ mod tests {
                 (ResponsesApi, OpenAiChat) => Some(ResponseOptions::ResponsesToChat {
                     model: "m",
                     custom_tools: &custom_tools,
+                    tool_namespaces: &tool_namespaces,
                 }),
                 (Anthropic, Gemini) => Some(ResponseOptions::GeminiToAnthropic { model: "m" }),
                 (Gemini, Anthropic) => Some(ResponseOptions::AnthropicToGemini),
@@ -861,11 +869,13 @@ mod tests {
         assert_eq!(gemini["candidates"][0]["content"]["parts"][0]["text"], "hi");
 
         let custom_tools = HashSet::new();
+        let tool_namespaces = ToolNamespaceMap::new();
         let responses = translate_response(
             &chat_resp,
             &ResponseOptions::ResponsesToChat {
                 model: "m",
                 custom_tools: &custom_tools,
+                tool_namespaces: &tool_namespaces,
             },
         )
         .unwrap();

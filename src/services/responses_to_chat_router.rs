@@ -48,8 +48,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 // Re-export public conversion functions used by other modules
 pub use responses_chat_conversion::{
-    collect_custom_tool_names, convert_chat_response_to_responses_sse,
-    convert_responses_to_chat_request, is_responses_api_format, parse_provider_response,
+    ToolNamespaceMap, collect_custom_tool_names, collect_namespace_tool_names,
+    convert_chat_response_to_responses_sse, convert_responses_to_chat_request,
+    is_responses_api_format, parse_provider_response,
 };
 
 // Internal re-exports used within this router
@@ -1083,6 +1084,7 @@ async fn handle_responses_api_via_chat(
         config.requires_reasoning_content,
         &original_model,
         &collect_custom_tool_names(body),
+        &collect_namespace_tool_names(body),
     );
 
     Ok(http_utils::http_response(200, "text/event-stream", &sse))
@@ -1187,6 +1189,7 @@ async fn stream_responses_via_chat(
         model: &original_model,
         requires_reasoning_content: effective_requires_reasoning,
         custom_tools: collect_custom_tool_names(body),
+        tool_namespaces: collect_namespace_tool_names(body),
     });
     while let Some(chunk) = response.chunk().await? {
         sniffer.observe(&chunk);

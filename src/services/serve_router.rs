@@ -31,7 +31,8 @@ use crate::services::provider_protocol::{
 };
 use crate::services::request_log::RequestLogger;
 use crate::services::responses_to_chat_router::{
-    ResponsesToChatRouterConfig, collect_custom_tool_names, convert_chat_response_to_responses_sse,
+    ResponsesToChatRouterConfig, ToolNamespaceMap, collect_custom_tool_names,
+    collect_namespace_tool_names, convert_chat_response_to_responses_sse,
 };
 use crate::services::route_cache::{RouteCache, RouteSlot};
 use crate::services::serve_responses::convert_chat_sse_to_responses_sse;
@@ -916,6 +917,7 @@ async fn handle_responses(request: &str, state: &ServeState) -> Result<RouterRes
     let mut config = responses_router_config(state, resolve_slot(&body, state).current().0);
     config.actual_model = Some(original_model.clone());
     let custom_tools = collect_custom_tool_names(&body);
+    let tool_namespaces = collect_namespace_tool_names(&body);
     let mut chat_body = translate_request(
         &body,
         &RequestOptions::ResponsesToChat(&config.conversion_config()),
@@ -927,6 +929,7 @@ async fn handle_responses(request: &str, state: &ServeState) -> Result<RouterRes
         client_wants_stream,
         &original_model,
         custom_tools,
+        tool_namespaces,
     )
 }
 
@@ -1938,6 +1941,7 @@ fn convert_chat_response_for_responses_route(
     client_wants_stream: bool,
     original_model: &str,
     custom_tools: HashSet<String>,
+    tool_namespaces: ToolNamespaceMap,
 ) -> Result<RouterResponse> {
     match chat_response {
         RouterResponse::Buffered {
@@ -1955,6 +1959,7 @@ fn convert_chat_response_for_responses_route(
                         std::str::from_utf8(&body)?,
                         original_model,
                         &custom_tools,
+                        &tool_namespaces,
                     )?
                 } else {
                     let chat_json: Value = serde_json::from_slice(&body)?;
@@ -1963,6 +1968,7 @@ fn convert_chat_response_for_responses_route(
                         false,
                         original_model,
                         &custom_tools,
+                        &tool_namespaces,
                     )
                 };
                 Ok(RouterResponse::buffered(
@@ -1977,6 +1983,7 @@ fn convert_chat_response_for_responses_route(
                     &ResponseOptions::ResponsesToChat {
                         model: original_model,
                         custom_tools: &custom_tools,
+                        tool_namespaces: &tool_namespaces,
                     },
                 )?;
                 Ok(RouterResponse::buffered(
@@ -2001,6 +2008,7 @@ fn convert_chat_response_for_responses_route(
                 model: original_model,
                 requires_reasoning_content: false,
                 custom_tools,
+                tool_namespaces,
             });
             let body = match *body {
                 StreamingBody::Upstream(upstream) => StreamingBody::Converted {
@@ -2163,6 +2171,7 @@ mod tests {
             false,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         )
         .unwrap();
 
@@ -2196,6 +2205,7 @@ mod tests {
             true,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         )
         .unwrap();
 
@@ -2231,6 +2241,7 @@ mod tests {
             false,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         );
 
         assert!(response.is_err());
@@ -2310,6 +2321,7 @@ mod tests {
             false,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         )
         .unwrap();
 
@@ -2330,6 +2342,7 @@ mod tests {
             true,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         )
         .unwrap();
 
@@ -2374,9 +2387,11 @@ mod tests {
 
         let response = convert_chat_response_for_responses_route(
             RouterResponse::buffered(200, CONTENT_TYPE_JSON, serde_json::to_vec(&chat).unwrap()),
-            true, // client wants stream
+            true,
+            // client wants stream
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         )
         .unwrap();
 
@@ -2600,6 +2615,7 @@ mod tests {
             false,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         );
         assert!(response.is_err());
     }
@@ -2612,6 +2628,7 @@ mod tests {
             false,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         );
         assert!(response.is_err());
     }
@@ -2625,6 +2642,7 @@ mod tests {
             true,
             "gpt-4o",
             HashSet::new(),
+            ToolNamespaceMap::new(),
         )
         .unwrap();
 
