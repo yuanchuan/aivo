@@ -3589,6 +3589,13 @@ conversation is preserved."
         // grows the transcript past this baseline (then it persists as a fork).
         self.pristine_import_len = session.pristine_import.then_some(self.history.len());
         self.import_fidelity = session.import_fidelity;
+        // An explicit launch model must win over the model stored in the
+        // resumed session. Bare `--resume` keeps the session's original model.
+        let resume_model = if self.model_explicit {
+            self.raw_model.clone()
+        } else {
+            session.raw_model.clone()
+        };
         self.draft.clear();
         self.cursor = 0;
         self.command_menu.reset();
@@ -3596,13 +3603,12 @@ conversation is preserved."
         self.draft_history_stash = None;
         self.pending_response.clear();
         self.pending_submit = None;
-        self.format = seeded_chat_format(&self.key, &session.raw_model);
+        self.format = seeded_chat_format(&self.key, &resume_model);
         self.last_usage = None;
         self.follow_output = true;
         self.transcript_scroll = 0;
-        self.raw_model = session.raw_model.clone();
-        self.model =
-            CodeCommand::transform_model_for_provider(&self.key.base_url, &session.raw_model);
+        self.raw_model = resume_model.clone();
+        self.model = CodeCommand::transform_model_for_provider(&self.key.base_url, &resume_model);
         self.billed_model = stored_billed;
         // Stored spend survives resume verbatim (it may include provider-reported
         // figures); legacy entries without one fall back to a list-price estimate.

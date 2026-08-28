@@ -653,6 +653,32 @@ async fn test_conversation_only_rewind_drops_pending_transcript() {
 /// Resuming must not leak the old session's plan/goal modes: a stale plan card
 /// would index the replaced history and `/plan go` would run the old plan.
 #[tokio::test]
+async fn test_resume_with_explicit_model_keeps_launch_model() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.raw_model = "new-model".to_string();
+    app.model = "new-model".to_string();
+    app.model_explicit = true;
+
+    let session = LoadedSession {
+        key_id: app.key.id.clone(),
+        session_id: "resumed-explicit-model".to_string(),
+        raw_model: "old-model".to_string(),
+        messages: vec![],
+        engine_messages: None,
+        pristine_import: false,
+        source_newer: false,
+        import_fidelity: None,
+        plan_state: None,
+        image_descriptions: None,
+    };
+    app.apply_loaded_session(session).await.unwrap();
+
+    assert_eq!(app.raw_model, "new-model");
+    assert_eq!(app.model, "new-model");
+}
+
+#[tokio::test]
 async fn test_resume_resets_plan_and_goal_state() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);

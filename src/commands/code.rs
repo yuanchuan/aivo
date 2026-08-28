@@ -1021,6 +1021,7 @@ impl CodeCommand {
             initial_draft_attachments: pending_attachments,
             startup_notice,
             initial_resume: resume,
+            model_explicit: model_flag.is_some(),
             initial_prompt,
             injected_context,
             injected_context_summary,
