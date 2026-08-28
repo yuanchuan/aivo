@@ -497,6 +497,31 @@ fn brand_palettes_keep_lime_focus_and_theme_aware_destructive_rows() {
     assert_ne!(Palette::LIGHT.select_bg, Palette::LIGHT.delete_bg);
     assert_ne!(Palette::DARK.error, Palette::DARK.info);
     assert_ne!(Palette::LIGHT.error, Palette::LIGHT.info);
+
+    let diff_colors = [
+        Palette::DARK.diff_add_bg,
+        Palette::DARK.diff_del_bg,
+        Palette::DARK.diff_add_fg,
+        Palette::DARK.diff_del_fg,
+        Palette::DARK.diff_add_sign,
+        Palette::DARK.diff_del_sign,
+        Palette::DARK.diff_add_hl_bg,
+        Palette::DARK.diff_del_hl_bg,
+        Palette::LIGHT.diff_add_bg,
+        Palette::LIGHT.diff_del_bg,
+        Palette::LIGHT.diff_add_fg,
+        Palette::LIGHT.diff_del_fg,
+        Palette::LIGHT.diff_add_sign,
+        Palette::LIGHT.diff_del_sign,
+        Palette::LIGHT.diff_add_hl_bg,
+        Palette::LIGHT.diff_del_hl_bg,
+    ];
+    assert!(
+        diff_colors
+            .iter()
+            .all(|color| matches!(color, Color::Indexed(_))),
+        "diff colors must avoid truecolor SGR sequences for old terminal compatibility"
+    );
 }
 
 #[tokio::test]
