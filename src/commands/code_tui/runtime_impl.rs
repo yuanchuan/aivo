@@ -416,6 +416,9 @@ impl CodeTuiApp {
         // A new turn rebuilds the transcript rows and snaps to the bottom, so any
         // prior selection would point at the wrong content — drop it.
         self.clear_transcript_selection();
+        // Persist the user turn before starting the provider request. A long
+        // `/goal` must be shareable while its assistant reply is still in flight.
+        self.persist_history().await?;
         // Fresh turn: a stale goal-stop arm must not interrupt it.
         self.goal_stop_confirm_pending = false;
         self.sending = true;

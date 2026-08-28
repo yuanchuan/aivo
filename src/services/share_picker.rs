@@ -135,3 +135,52 @@ async fn load_rows(
 ) -> Result<(Vec<UnifiedRow>, crate::commands::logs::RunMetaIndex)> {
     fetch_unified_rows(store, args).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::session_store::{SessionTokens, StoredChatMessage};
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn load_rows_includes_a_live_code_checkpoint_before_its_first_turn() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = SessionStore::with_path(temp_dir.path().join("config.json"));
+        let key_id = store
+            .add_key_with_protocol("prod", "https://api.example.com", None, "sk-test")
+            .await
+            .unwrap();
+        let messages = vec![StoredChatMessage {
+            role: "user".to_string(),
+            content: "/goal finish the task".to_string(),
+            model: None,
+            reasoning_content: None,
+            id: None,
+            timestamp: None,
+            attachments: None,
+        }];
+        store
+            .save_code_session_with_id(
+                &key_id,
+                "https://api.example.com",
+                "/tmp/demo",
+                "live-picker-session",
+                "claude",
+                None,
+                &messages,
+                "claude",
+                "claude",
+                SessionTokens::default(),
+                0.0,
+            )
+            .await
+            .unwrap();
+
+        let args = build_logs_args(Path::new("/tmp/demo"), false);
+        let (rows, _) = load_rows(&store, &args).await.unwrap();
+        assert!(
+            rows.iter().any(|row| row.id() == "live-picker-session"),
+            "a running code session must be visible before its first completed turn"
+        );
+    }
+}
