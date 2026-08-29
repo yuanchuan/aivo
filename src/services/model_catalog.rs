@@ -337,6 +337,23 @@ fn format_token_count(n: u64) -> String {
     }
 }
 
+/// Every candidate 404'd — the provider has no models endpoint (e.g. Codex
+/// ChatGPT OAuth); explicit pickers soft-fall-back instead of surfacing it.
+#[derive(Debug)]
+pub(crate) struct NoModelsEndpoint;
+
+impl std::fmt::Display for NoModelsEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider has no models endpoint")
+    }
+}
+
+impl std::error::Error for NoModelsEndpoint {}
+
+pub(crate) fn is_no_models_endpoint(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<NoModelsEndpoint>())
+}
+
 /// Build a friendly error for a non-2xx response from a model-listing endpoint.
 /// Leads with the user's intent ("No models found" for 404, "Could not fetch
 /// models" otherwise), then explains why — extracting JSON `error.message`
@@ -373,7 +390,16 @@ fn friendly_api_error_with_hint(
         (None, Some(h)) => h.to_string(),
         (None, None) => format!("server returned {}", status),
     };
-    anyhow::anyhow!("{} — {}", lead, reason)
+    let message = format!("{} — {}", lead, reason);
+    match status.as_u16() {
+        401 | 403 => anyhow::Error::new(crate::errors::CLIError::new(
+            message,
+            crate::errors::ErrorCategory::Auth,
+            None::<String>,
+            None::<String>,
+        )),
+        _ => anyhow::anyhow!(message),
+    }
 }
 
 /// Pull a one-line message out of an upstream error body. Recognizes common
@@ -992,6 +1018,7 @@ pub(crate) async fn fetch_models_detailed_filtered(
             let auth = format!("Bearer {}", key.key.as_str());
 
             let mut last_err = String::new();
+            let mut missing_everywhere = true;
             let mut success: Option<Vec<ModelInfo>> = None;
             for url in &candidates {
                 let response = client
@@ -1004,9 +1031,14 @@ pub(crate) async fn fetch_models_detailed_filtered(
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
                     let error = friendly_api_error(status, &body);
-                    if !crate::services::provider_protocol::is_endpoint_missing(status.as_u16()) {
+                    // Ambiguous 4xx and garbage 200s may be "wrong path" on a
+                    // proxy — keep probing (issue #24); only auth/rate/5xx bail.
+                    let code = status.as_u16();
+                    if crate::services::provider_protocol::is_terminal_upstream_error(code) {
                         return Err(error);
                     }
+                    missing_everywhere &=
+                        crate::services::provider_protocol::is_endpoint_missing(code);
                     last_err = error.to_string();
                     continue;
                 }
@@ -1024,17 +1056,17 @@ pub(crate) async fn fetch_models_detailed_filtered(
                         break;
                     }
                     Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "Invalid models response from {}: {}",
-                            url,
-                            e
-                        ));
+                        missing_everywhere = false;
+                        last_err = format!("Invalid models response from {}: {}", url, e);
                     }
                 }
             }
 
             match success {
                 Some(v) => Ok(v),
+                None if missing_everywhere => {
+                    Err(anyhow::Error::new(NoModelsEndpoint).context(last_err))
+                }
                 None => anyhow::bail!("{}", last_err),
             }
         }
@@ -1192,6 +1224,119 @@ mod tests {
             "an auth error must not trigger the fallback /models request"
         );
         server.abort();
+    }
+
+    async fn spawn_sequence_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut paths = Vec::new();
+            for (status, body) in responses {
+                let Ok(Ok((mut socket, _))) =
+                    timeout(Duration::from_secs(2), listener.accept()).await
+                else {
+                    break;
+                };
+                let mut request = vec![0u8; 4096];
+                let size = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                paths.push(
+                    request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                let response = format!(
+                    "HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            paths
+        });
+        (format!("http://{}", address), handle)
+    }
+
+    #[tokio::test]
+    async fn openai_models_ambiguous_4xx_falls_through_to_next_candidate() {
+        let (base, handle) = spawn_sequence_server(vec![
+            (400, r#"{"error":{"message":"bad path"}}"#.to_string()),
+            (200, r#"{"data":[{"id":"listed-model"}]}"#.to_string()),
+        ])
+        .await;
+        let key = make_key(&base);
+        let client = crate::services::http_utils::router_http_client_loopback();
+        let models = fetch_models_detailed_filtered(&client, &key, false)
+            .await
+            .expect("a 400 on /v1/models must not abort the candidate cascade");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "listed-model");
+        assert_eq!(handle.await.unwrap(), vec!["/v1/models", "/models"]);
+    }
+
+    #[tokio::test]
+    async fn openai_models_catch_all_200_falls_through_to_next_candidate() {
+        let (base, handle) = spawn_sequence_server(vec![
+            (200, "<html>catch-all index</html>".to_string()),
+            (200, r#"{"data":[{"id":"listed-model"}]}"#.to_string()),
+        ])
+        .await;
+        let key = make_key(&base);
+        let client = crate::services::http_utils::router_http_client_loopback();
+        let models = fetch_models_detailed_filtered(&client, &key, false)
+            .await
+            .expect("a non-JSON 200 must not abort the candidate cascade");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(handle.await.unwrap(), vec!["/v1/models", "/models"]);
+    }
+
+    #[tokio::test]
+    async fn openai_models_all_404_marks_no_models_endpoint() {
+        let (base, _handle) =
+            spawn_sequence_server(vec![(404, String::new()), (404, String::new())]).await;
+        let key = make_key(&base);
+        let client = crate::services::http_utils::router_http_client_loopback();
+        let error = fetch_models_detailed_filtered(&client, &key, false)
+            .await
+            .expect_err("exhausted candidates must fail");
+
+        assert!(
+            is_no_models_endpoint(&error),
+            "all-404 exhaustion must carry the NoModelsEndpoint marker: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_models_mixed_4xx_is_not_no_models_endpoint() {
+        let (base, _handle) =
+            spawn_sequence_server(vec![(400, String::new()), (404, String::new())]).await;
+        let key = make_key(&base);
+        let client = crate::services::http_utils::router_http_client_loopback();
+        let error = fetch_models_detailed_filtered(&client, &key, false)
+            .await
+            .expect_err("exhausted candidates must fail");
+
+        assert!(
+            !is_no_models_endpoint(&error),
+            "a non-404 failure means the endpoint may exist: {error:#}"
+        );
+    }
+
+    #[test]
+    fn friendly_api_error_auth_status_maps_to_auth_exit_code() {
+        use crate::errors::{ExitCode, exit_code_for_error};
+        let err = friendly_api_error(reqwest::StatusCode::UNAUTHORIZED, "");
+        assert_eq!(exit_code_for_error(&err), ExitCode::AuthError);
+        let err = friendly_api_error(reqwest::StatusCode::NOT_FOUND, "");
+        assert_eq!(exit_code_for_error(&err), ExitCode::UserError);
     }
 
     #[test]

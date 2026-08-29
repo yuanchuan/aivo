@@ -585,7 +585,12 @@ impl StartCommand {
         .await
         {
             Ok(models) => models,
-            Err(e) if explicit_picker => return Err(e),
+            Err(e)
+                if explicit_picker
+                    && !crate::services::model_catalog::is_no_models_endpoint(&e) =>
+            {
+                return Err(e);
+            }
             Err(_) => Vec::new(),
         };
         if models.is_empty() {

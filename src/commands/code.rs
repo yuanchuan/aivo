@@ -608,13 +608,20 @@ impl CodeCommand {
                 // Fetch the full catalog and annotate non-chat models as
                 // disabled rather than hiding them — users see why image /
                 // audio / embedding entries aren't selectable.
-                let models_list = crate::commands::models::fetch_all_models_for_picker(
+                let models_list = match crate::commands::models::fetch_all_models_for_picker(
                     &client,
                     &key,
                     &self.cache,
                     refresh,
                 )
-                .await?;
+                .await
+                {
+                    Ok(models) => models,
+                    Err(e) if crate::services::model_catalog::is_no_models_endpoint(&e) => {
+                        Vec::new()
+                    }
+                    Err(e) => return Err(e),
+                };
 
                 if models_list.is_empty() {
                     anyhow::bail!(

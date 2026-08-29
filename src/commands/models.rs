@@ -505,7 +505,12 @@ pub async fn resolve_model_outcome(
 
     let models_list = match fetch_all_models_for_picker(client, key, cache, refresh).await {
         Ok(models) => models,
-        Err(e) if explicit_model_flag => return Err(e),
+        Err(e)
+            if explicit_model_flag
+                && !crate::services::model_catalog::is_no_models_endpoint(&e) =>
+        {
+            return Err(e);
+        }
         Err(_) => Vec::new(),
     };
     if models_list.is_empty() {
