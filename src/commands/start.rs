@@ -575,13 +575,18 @@ impl StartCommand {
         let client = http_utils::router_http_client();
         // Full catalog + per-row annotations: non-chat models show as
         // disabled with a reason, rather than being silently stripped.
-        let models = crate::commands::models::fetch_all_models_for_picker(
+        let models = match crate::commands::models::fetch_all_models_for_picker(
             &client,
             key,
             &self.cache,
             refresh,
         )
-        .await;
+        .await
+        {
+            Ok(models) => models,
+            Err(e) if explicit_picker => return Err(e),
+            Err(_) => Vec::new(),
+        };
         if models.is_empty() {
             // No fetchable model list (common for providers without a public
             // /v1/models endpoint — e.g. Codex ChatGPT OAuth). Skip the

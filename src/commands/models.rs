@@ -362,21 +362,22 @@ fn format_multiplier(m: f64) -> String {
 /// `run`/`start`/`chat` pickers. Returns instantly on a cache hit; shows a
 /// "Fetching models…" spinner only while a genuine network fetch runs — a hit
 /// must stay instant, since `stop_spinner` sleeps 100ms and would flash a frame.
-/// Empty on fetch failure: callers treat that as "no list → use tool default".
+/// Fetch errors are returned so explicit picker requests can show the actual
+/// provider error instead of reducing it to an empty model list.
 pub(crate) async fn fetch_all_models_for_picker(
     client: &Client,
     key: &ApiKey,
     cache: &ModelsCache,
     refresh: bool,
-) -> Vec<String> {
+) -> anyhow::Result<Vec<String>> {
     if !refresh && let Some(cached) = full_catalog_cached(key, cache).await {
-        return cached;
+        return Ok(cached);
     }
     let (spinning, handle) = style::start_spinner(Some(" Fetching models..."));
     let result = fetch_all_models_cached(client, key, cache, true).await;
     style::stop_spinner(&spinning);
     let _ = handle.await;
-    result.unwrap_or_default()
+    result
 }
 
 /// Fetches the model list (cache-first) with a spinner for network fetches,
@@ -502,7 +503,11 @@ pub async fn resolve_model_outcome(
         return Ok(ModelOutcome::UseDefault);
     }
 
-    let models_list = fetch_all_models_for_picker(client, key, cache, refresh).await;
+    let models_list = match fetch_all_models_for_picker(client, key, cache, refresh).await {
+        Ok(models) => models,
+        Err(e) if explicit_model_flag => return Err(e),
+        Err(_) => Vec::new(),
+    };
     if models_list.is_empty() {
         if explicit_model_flag {
             crate::commands::print_no_model_list_hint();

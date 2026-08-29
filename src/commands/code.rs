@@ -611,7 +611,7 @@ impl CodeCommand {
                     &self.cache,
                     refresh,
                 )
-                .await;
+                .await?;
 
                 if models_list.is_empty() {
                     anyhow::bail!(
