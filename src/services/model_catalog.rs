@@ -1003,7 +1003,11 @@ pub(crate) async fn fetch_models_detailed_filtered(
                 if !response.status().is_success() {
                     let status = response.status();
                     let body = response.text().await.unwrap_or_default();
-                    last_err = friendly_api_error(status, &body).to_string();
+                    let error = friendly_api_error(status, &body);
+                    if !crate::services::provider_protocol::is_endpoint_missing(status.as_u16()) {
+                        return Err(error);
+                    }
+                    last_err = error.to_string();
                     continue;
                 }
 
@@ -1020,7 +1024,11 @@ pub(crate) async fn fetch_models_detailed_filtered(
                         break;
                     }
                     Err(e) => {
-                        last_err = format!("Invalid models response from {}: {}", url, e);
+                        return Err(anyhow::anyhow!(
+                            "Invalid models response from {}: {}",
+                            url,
+                            e
+                        ));
                     }
                 }
             }
@@ -1089,6 +1097,9 @@ mod tests {
     use super::*;
     use crate::services::models_cache::ModelsCache;
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::time::{Duration, timeout};
 
     fn make_key(url: &str) -> ApiKey {
         use zeroize::Zeroizing;
@@ -1130,6 +1141,57 @@ mod tests {
                 "https://api.example.com/models",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn openai_models_auth_error_does_not_probe_fallback_path() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (paths_tx, mut paths_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok(Ok((mut socket, _))) =
+                    timeout(Duration::from_secs(2), listener.accept()).await
+                else {
+                    return;
+                };
+                let mut request = vec![0u8; 4096];
+                let size = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = paths_tx.send(path);
+
+                let body = r#"{"error":{"message":"Invalid token","type":"api_error"}}"#;
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let key = make_key(&format!("http://{}", address));
+        let client = crate::services::http_utils::router_http_client_loopback();
+        let error = fetch_models_detailed_filtered(&client, &key, false)
+            .await
+            .expect_err("an invalid token must fail model listing");
+
+        assert!(error.to_string().contains("Invalid token"));
+        assert_eq!(paths_rx.recv().await.as_deref(), Some("/v1/models"));
+        assert!(
+            timeout(Duration::from_millis(200), paths_rx.recv())
+                .await
+                .is_err(),
+            "an auth error must not trigger the fallback /models request"
+        );
+        server.abort();
     }
 
     #[test]
