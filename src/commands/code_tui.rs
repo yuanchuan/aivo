@@ -226,6 +226,7 @@ impl CodeTuiApp {
         app.draft_history_all = draft_history_all;
         app.session_id = params.initial_session;
         app.model_explicit = params.model_explicit;
+        app.key_explicit = params.key_explicit;
         app.notice = startup_notice;
         app.context_window_override = params.max_context;
         app.injected_context = params.injected_context;

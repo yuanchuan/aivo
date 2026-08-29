@@ -359,7 +359,6 @@ pub async fn run() -> ! {
                 }
                 crate::commands::code_agent_oneshot::set_json_schema(schema);
             }
-            let key_explicit = code_args.key.is_some();
             let initial_prompt = match take_code_initial_prompt(&mut code_args) {
                 Ok(prompt) => prompt,
                 Err(CodePositionalReject::NotACommand(raw)) => {
@@ -414,6 +413,7 @@ pub async fn run() -> ! {
                 );
                 process::exit(ExitCode::UserError.code());
             }
+            let key_explicit = code_args.key.is_some() || model_key_ref.is_some();
             let effective_key = code_args.key.clone().or(model_key_ref);
             let expanded_model = have_model_input.then_some(model_half);
             let key_override = if is_hf_takeover(expanded_model.as_deref()) {
@@ -449,6 +449,7 @@ pub async fn run() -> ! {
                     code_args.attachments,
                     code_args.refresh,
                     key_override,
+                    key_explicit,
                     code_args.json,
                     code_args.resume,
                     // `--1m`/`--2m` shorthands collapse into max_context, same

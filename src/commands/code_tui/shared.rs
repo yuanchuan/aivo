@@ -748,6 +748,9 @@ pub(crate) struct CodeTuiParams {
     /// Whether `--model`/`-m` was supplied for this launch. Explicit launch
     /// choices must survive resume instead of being replaced by session state.
     pub model_explicit: bool,
+    /// Whether `-k` or a `key::model` spec explicitly selected the provider.
+    /// Explicit launch choices must survive resume instead of being replaced by session state.
+    pub key_explicit: bool,
     /// Positional `aivo code "<text>"`: auto-sent as the first message.
     pub initial_prompt: Option<String>,
     /// Context-digest block (`--resume`'s digest rung), appended to the system
@@ -3138,6 +3141,9 @@ pub(super) struct CodeTuiApp {
     /// Whether the launch explicitly selected a model; explicit CLI choices win
     /// over the model stored in a resumed session.
     pub(super) model_explicit: bool,
+    /// Whether the launch explicitly selected a key; explicit CLI choices win
+    /// over the key stored in a resumed session.
+    pub(super) key_explicit: bool,
     /// Upstream model captured from the most recent turn so heartbeat
     /// saves (no fresh turn in scope) can still write `billed_model` to
     /// the session index. Cleared on key/model switch and resume.
@@ -3838,6 +3844,7 @@ impl CodeTuiApp {
             raw_model: String::new(),
             model: String::new(),
             model_explicit: false,
+            key_explicit: false,
             billed_model: None,
             turn_model: None,
             format: ChatFormat::OpenAI,

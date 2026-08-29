@@ -3522,7 +3522,7 @@ conversation is preserved."
 
     pub(super) async fn apply_loaded_session(&mut self, session: LoadedSession) -> Result<()> {
         let mut key_fallback_notice = None;
-        if self.key.id != session.key_id {
+        if !self.key_explicit && self.key.id != session.key_id {
             match self.session_store.get_key_by_id(&session.key_id).await? {
                 Some(key) => {
                     self.key = key;

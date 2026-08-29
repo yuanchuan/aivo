@@ -679,6 +679,32 @@ async fn test_resume_with_explicit_model_keeps_launch_model() {
 }
 
 #[tokio::test]
+async fn test_resume_with_explicit_key_keeps_launch_key() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.key_explicit = true;
+    let launch_key_id = app.key.id.clone();
+    let launch_base_url = app.key.base_url.clone();
+
+    let session = LoadedSession {
+        key_id: "old-session-key".to_string(),
+        session_id: "resumed-explicit-key".to_string(),
+        raw_model: "old-model".to_string(),
+        messages: vec![],
+        engine_messages: None,
+        pristine_import: false,
+        source_newer: false,
+        import_fidelity: None,
+        plan_state: None,
+        image_descriptions: None,
+    };
+    app.apply_loaded_session(session).await.unwrap();
+
+    assert_eq!(app.key.id, launch_key_id);
+    assert_eq!(app.key.base_url, launch_base_url);
+}
+
+#[tokio::test]
 async fn test_resume_resets_plan_and_goal_state() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);

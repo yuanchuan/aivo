@@ -481,6 +481,7 @@ impl StartCommand {
                 Vec::new(),
                 args.refresh,
                 key_override,
+                args.key.is_some(),
                 false,
                 None,
                 None,
