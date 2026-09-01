@@ -74,7 +74,8 @@ jobs:
             # panic=immediate-abort (drops panic/format machinery), no panic
             # location strings, and size-optimized std internals (drops the
             # backtrace machinery, dead under immediate-abort). Nightly-only.
-            RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none" \
+            # musl sets default-uwtable; panic=abort never unwinds (1.14 MiB).
+            RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none -Cforce-unwind-tables=no" \
               cargo +nightly-2026-07-08 build --release \
               -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size \
               --target ${{ matrix.target }}
