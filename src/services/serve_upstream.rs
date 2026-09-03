@@ -16,6 +16,7 @@ use crate::services::openai_anthropic_bridge::convert_openai_chat_response_to_ss
 use crate::services::openai_gemini_bridge::{
     build_google_generate_content_url, build_google_stream_generate_content_url,
 };
+use crate::services::opencode_session;
 use crate::services::wire_format::{
     RequestOptions, ResponseOptions, StreamAdapter, StreamOptions, stream_adapter,
     translate_request, translate_response,
@@ -89,14 +90,16 @@ pub(crate) async fn send_anthropic_chat(
 
     let url = http_utils::build_target_url(&context.upstream_base_url, "/v1/messages");
     let response = context
-        .with_device_headers(
+        .with_device_headers(opencode_session::with_session_header(
             context
                 .client
                 .post(&url)
                 .header("x-api-key", context.upstream_api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", CONTENT_TYPE_JSON),
-        )
+            &url,
+            Some(&anthropic_req),
+        ))
         .json(&anthropic_req)
         .send_logged()
         .await?;
@@ -201,14 +204,16 @@ pub(crate) async fn send_anthropic_native(
 
     let url = http_utils::build_target_url(&context.upstream_base_url, "/v1/messages");
     let response = context
-        .with_device_headers(
+        .with_device_headers(opencode_session::with_session_header(
             context
                 .client
                 .post(&url)
                 .header("x-api-key", context.upstream_api_key.as_str())
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", CONTENT_TYPE_JSON),
-        )
+            &url,
+            Some(&anthropic_req),
+        ))
         .json(&anthropic_req)
         .send_logged()
         .await?;
@@ -397,6 +402,7 @@ async fn send_openai_chat_once(
     if let Some(model) = grok_model {
         req = req.header(crate::services::grok_oauth::MODEL_OVERRIDE_HEADER, model);
     }
+    req = opencode_session::with_session_header(req, url, Some(body));
     Ok(context
         .with_device_headers(req)
         .json(body)
@@ -696,6 +702,7 @@ pub(crate) async fn send_openai_embeddings(
         None,
     )
     .await?;
+    let req = opencode_session::with_session_header(req, &url, None);
 
     let response = context
         .with_device_headers(req)

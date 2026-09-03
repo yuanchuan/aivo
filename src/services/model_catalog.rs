@@ -1021,11 +1021,13 @@ pub(crate) async fn fetch_models_detailed_filtered(
             let mut missing_everywhere = true;
             let mut success: Option<Vec<ModelInfo>> = None;
             for url in &candidates {
-                let response = client
-                    .get(url)
-                    .header("Authorization", &auth)
-                    .send_logged()
-                    .await?;
+                let response = crate::services::opencode_session::with_session_header(
+                    client.get(url).header("Authorization", &auth),
+                    url,
+                    None,
+                )
+                .send_logged()
+                .await?;
 
                 if !response.status().is_success() {
                     let status = response.status();

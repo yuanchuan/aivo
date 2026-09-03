@@ -1805,9 +1805,16 @@ fn direct_base_url(key: &ApiKey) -> String {
     normalize_base_url(&resolved).to_string()
 }
 
+/// `None`: these helpers never see turn history, and plain chat is one
+/// conversation per process, so the per-process fallback id fits.
+fn with_session(builder: reqwest::RequestBuilder, key: &ApiKey) -> reqwest::RequestBuilder {
+    crate::services::opencode_session::with_session_header(builder, &key.base_url, None)
+}
+
 /// Conditionally adds auth headers to a request. Skips when the key is empty
 /// (e.g. the free aivo starter provider needs no authentication).
 fn with_auth(builder: reqwest::RequestBuilder, key: &ApiKey) -> reqwest::RequestBuilder {
+    let builder = with_session(builder, key);
     if key.key.is_empty() {
         crate::services::device_fingerprint::with_starter_headers(builder)
     } else {
@@ -1818,6 +1825,7 @@ fn with_auth(builder: reqwest::RequestBuilder, key: &ApiKey) -> reqwest::Request
 /// Adds native Anthropic auth headers. Some Anthropic-compatible gateways reject
 /// a simultaneous OpenAI-style Authorization bearer, so send only `x-api-key`.
 fn with_auth_anthropic(builder: reqwest::RequestBuilder, key: &ApiKey) -> reqwest::RequestBuilder {
+    let builder = with_session(builder, key);
     if key.key.is_empty() {
         crate::services::device_fingerprint::with_starter_headers(builder)
     } else {
@@ -1827,6 +1835,7 @@ fn with_auth_anthropic(builder: reqwest::RequestBuilder, key: &ApiKey) -> reqwes
 
 /// Adds the `x-goog-api-key` header for Google Gemini native API.
 fn with_auth_google(builder: reqwest::RequestBuilder, key: &ApiKey) -> reqwest::RequestBuilder {
+    let builder = with_session(builder, key);
     if key.key.is_empty() {
         crate::services::device_fingerprint::with_starter_headers(builder)
     } else {

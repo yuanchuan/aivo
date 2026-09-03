@@ -25,6 +25,7 @@ use crate::services::openai_anthropic_bridge::{
     convert_anthropic_to_openai_chat_response, convert_openai_chat_response_to_sse,
 };
 use crate::services::openai_gemini_bridge::{build_google_generate_content_url, openai_chat_model};
+use crate::services::opencode_session;
 use crate::services::protocol_fallback::{
     AttemptOutcome, FirstError, MismatchDirective, QuirkRetryState, classify_attempt,
     commit_protocol_switch, mismatch_directive, protocol_candidates, record_request_outcome,
@@ -755,6 +756,7 @@ async fn run_chat_via_responses(
         initiator,
     )
     .await?;
+    let req = opencode_session::with_session_header(req, &target_url, Some(&body));
     let mut response =
         device_fingerprint::maybe_with_starter_headers(req.json(&body), config.is_starter)
             .send_logged()
@@ -875,6 +877,7 @@ async fn try_responses_api_passthrough(
     )
     .await
     .ok()?;
+    let req = opencode_session::with_session_header(req, &target_url, Some(&body));
     let mut response =
         device_fingerprint::maybe_with_starter_headers(req.json(&body), config.is_starter)
             .send_logged()
@@ -1119,6 +1122,7 @@ async fn stream_responses_via_chat(
         initiator,
     )
     .await?;
+    let req = opencode_session::with_session_header(req, &target_url, Some(&chat_body));
     let mut response =
         device_fingerprint::maybe_with_starter_headers(req.json(&chat_body), config.is_starter)
             .send_logged()
@@ -1251,6 +1255,7 @@ async fn stream_chat_completions(
         initiator,
     )
     .await?;
+    let req = opencode_session::with_session_header(req, &target_url, Some(&body));
     let response =
         device_fingerprint::maybe_with_starter_headers(req.json(&body), config.is_starter)
             .send_logged()
@@ -1362,6 +1367,7 @@ async fn forward_request(
         None,
     )
     .await?;
+    req = opencode_session::with_session_header(req, &target_url, None);
 
     if !body_str.is_empty() {
         req = req.body(body_str.to_string());
@@ -1509,6 +1515,7 @@ async fn forward_openai_protocol(
         initiator,
     )
     .await?;
+    let req = opencode_session::with_session_header(req, &target_url, Some(body));
     let response =
         device_fingerprint::maybe_with_starter_headers(req.json(body), config.is_starter)
             .send_logged()
@@ -1578,6 +1585,7 @@ async fn try_responses_fallback(
         None,
     )
     .await?;
+    let req = opencode_session::with_session_header(req, &target_url, Some(&responses_body));
     let response = device_fingerprint::maybe_with_starter_headers(
         req.json(&responses_body),
         config.is_starter,
@@ -1627,9 +1635,13 @@ async fn forward_anthropic_protocol(
     }
 
     let target_url = build_target_url(&config.target_base_url, variant.apply("/v1/messages"));
+    let req = opencode_session::with_session_header(
+        with_anthropic_messages_headers(client.post(&target_url), &config.api_key),
+        &target_url,
+        Some(&anthropic_body),
+    );
     let response = device_fingerprint::maybe_with_starter_headers(
-        with_anthropic_messages_headers(client.post(&target_url), &config.api_key)
-            .json(&anthropic_body),
+        req.json(&anthropic_body),
         config.is_starter,
     )
     .send_logged()

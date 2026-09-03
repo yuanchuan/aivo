@@ -15,6 +15,7 @@ use crate::services::model_names::select_model_for_provider_attempt;
 use crate::services::openai_gemini_bridge::{
     build_google_generate_content_url, convert_openai_chat_to_gemini_sse, openai_chat_model,
 };
+use crate::services::opencode_session;
 use crate::services::protocol_fallback::{
     AttemptOutcome, FirstError, MismatchDirective, QuirkRetryState, classify_attempt,
     commit_protocol_switch, mismatch_directive, protocol_candidates, record_slot_outcome,
@@ -449,6 +450,7 @@ async fn forward_to_provider(
                     initiator,
                 )
                 .await?;
+                let req = opencode_session::with_session_header(req, &target_url, Some(&req_body));
                 let response = device_fingerprint::maybe_with_starter_headers(
                     req.json(&req_body),
                     config.is_starter,
@@ -480,6 +482,8 @@ async fn forward_to_provider(
                     initiator,
                 )
                 .await?;
+                let req =
+                    opencode_session::with_session_header(req, &target_url, Some(&responses_body));
                 let response = device_fingerprint::maybe_with_starter_headers(
                     req.json(&responses_body),
                     config.is_starter,

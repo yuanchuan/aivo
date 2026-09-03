@@ -14,6 +14,7 @@ use crate::services::anthropic_route_pipeline::{RequestContext, RouterPipeline};
 use crate::services::device_fingerprint;
 use crate::services::http_debug::LoggedSend;
 use crate::services::http_utils::{self, router_http_model_client};
+use crate::services::opencode_session;
 use crate::services::token_usage::{
     StreamUsageSniffer, TokenUsage, UsageAccounting, parse_token_usage,
 };
@@ -311,6 +312,7 @@ async fn forward_request(
     headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_value)?);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE_JSON));
     pipeline.patch_headers(route.patch_route(), &mut headers, &ctx)?;
+    opencode_session::insert_session_header(&mut headers, &url, Some(&body));
 
     let is_starter = config.is_starter;
     let response = device_fingerprint::maybe_with_starter_headers(
@@ -336,6 +338,7 @@ async fn forward_request(
             retry_headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_value)?);
             retry_headers.insert(CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE_JSON));
             pipeline.patch_headers(route.patch_route(), &mut retry_headers, &ctx)?;
+            opencode_session::insert_session_header(&mut retry_headers, &url, Some(&body));
 
             let retry_response = device_fingerprint::maybe_with_starter_headers(
                 client.post(&url).headers(retry_headers).json(&body),

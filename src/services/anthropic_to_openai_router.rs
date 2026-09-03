@@ -37,6 +37,7 @@ use crate::services::openai_gemini_bridge::{build_google_generate_content_url, o
 use crate::services::openai_models::{
     OpenAIChatRequest, stringify_message_content as stringify_typed_message_content,
 };
+use crate::services::opencode_session;
 use crate::services::protocol_fallback::{
     AttemptOutcome, FirstError, MismatchDirective, QuirkRetryState, classify_attempt,
     commit_protocol_switch, mismatch_directive, protocol_candidates, record_slot_outcome,
@@ -474,7 +475,8 @@ async fn send_native_anthropic(
     passthrough_headers: &HeaderMap,
     beta_header_rejected: &AtomicBool,
 ) -> Result<SendNativeOutcome> {
-    let headers = build_native_anthropic_headers(passthrough_headers, &config.target_api_key)?;
+    let mut headers = build_native_anthropic_headers(passthrough_headers, &config.target_api_key)?;
+    opencode_session::insert_session_header(&mut headers, url, Some(native_body));
     let is_starter = config.is_starter;
     let response = device_fingerprint::maybe_with_starter_headers(
         client.post(url).headers(headers).json(native_body),
@@ -498,6 +500,7 @@ async fn send_native_anthropic(
             let mut retry_headers =
                 build_native_anthropic_headers(passthrough_headers, &config.target_api_key)?;
             http_utils::strip_beta_headers(&mut retry_headers);
+            opencode_session::insert_session_header(&mut retry_headers, url, Some(native_body));
 
             let retry_response = device_fingerprint::maybe_with_starter_headers(
                 client.post(url).headers(retry_headers).json(native_body),
@@ -812,6 +815,12 @@ async fn handle_anthropic_to_upstream(
             config,
             protocol,
             catalog.as_deref(),
+        );
+        // Keyed off the base: every protocol branch forwards these headers to it.
+        opencode_session::insert_session_header(
+            &mut attempt_headers,
+            &config.target_base_url,
+            Some(&req_body),
         );
 
         // Apply model prefix for OpenAI protocol

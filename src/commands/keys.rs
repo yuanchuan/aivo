@@ -1234,12 +1234,14 @@ async fn probe_key(key: &ApiKey) -> Result<PingStatus> {
             } else {
                 format!("{}/v1/models", base)
             };
-            match client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", key.key.as_str()))
-                .send()
-                .await
-            {
+            let req = crate::services::opencode_session::with_session_header(
+                client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", key.key.as_str())),
+                &url,
+                None,
+            );
+            match req.send().await {
                 Ok(r) => Ok(PingStatus::from_http_status(r.status().as_u16())),
                 Err(_) => Ok(PingStatus::Unreachable),
             }

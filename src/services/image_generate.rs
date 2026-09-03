@@ -234,11 +234,15 @@ async fn generate_via_images_api(
 ) -> Result<(Vec<String>, String), String> {
     let url =
         crate::services::http_utils::build_target_url(&key.base_url, "/v1/images/generations");
-    let send = client
-        .post(&url)
-        .bearer_auth(key.key.as_str())
-        .json(&serde_json::json!({ "model": model, "prompt": prompt }))
-        .send();
+    let send = crate::services::opencode_session::with_session_header(
+        client
+            .post(&url)
+            .bearer_auth(key.key.as_str())
+            .json(&serde_json::json!({ "model": model, "prompt": prompt })),
+        &url,
+        None,
+    )
+    .send();
     let resp = match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), send).await {
         Err(_) => return Err(format!("image generation via {model} timed out")),
         Ok(Err(e)) => return Err(format!("image generation via {model} failed: {e}")),
