@@ -31,6 +31,7 @@ impl RedactCtx {
     }
 }
 
+const CAT_PRIVATE_KEY: &str = "private_key";
 const CAT_API_KEY: &str = "api_key";
 const CAT_ANTHROPIC_OAUTH: &str = "anthropic_oauth";
 const CAT_AUTH_HEADER: &str = "authorization_header";
@@ -44,8 +45,10 @@ const CAT_HOME_PATH: &str = "home_path";
 /// across many strings.
 pub fn scan_text(input: &str, ctx: &RedactCtx, hits: &mut HashMap<String, usize>) -> String {
     // Order matters: header rules consume their value, so they run before
-    // the standalone token rules that would also match the same suffix.
-    let s = pass_auth_header(input, hits);
+    // the standalone token rules that would also match the same suffix. The
+    // private-key span goes first so token rules can't fire inside its body.
+    let s = pass_private_key(input, hits);
+    let s = pass_auth_header(&s, hits);
     let s = pass_bearer_token(&s, hits);
     let s = pass_anthropic_oauth(&s, hits);
     let s = pass_api_key(&s, hits);
@@ -143,6 +146,51 @@ pub fn scan_value(v: &mut Value, ctx: &RedactCtx, hits: &mut HashMap<String, usi
 
 fn bump(hits: &mut HashMap<String, usize>, category: &str) {
     *hits.entry(category.to_string()).or_insert(0) += 1;
+}
+
+// ---------------------------------------------------------------------------
+// Pass 0: PEM/OpenSSH private-key blocks — a span rule, not a token rule: the
+// base64 body has no key-shaped prefix for the token passes to catch.
+// ---------------------------------------------------------------------------
+
+fn pass_private_key(input: &str, hits: &mut HashMap<String, usize>) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let Some(begin) = rest.find(BEGIN) else {
+            out.push_str(rest);
+            return out;
+        };
+        let label_start = begin + BEGIN.len();
+        let Some(label_len) = rest[label_start..].find("-----") else {
+            out.push_str(rest);
+            return out;
+        };
+        let label = &rest[label_start..label_start + label_len];
+        // A newline before the closing dashes means this isn't a PEM header.
+        if !label.contains("PRIVATE KEY") || label.contains('\n') {
+            out.push_str(&rest[..label_start]);
+            rest = &rest[label_start..];
+            continue;
+        }
+        out.push_str(&rest[..begin]);
+        out.push_str("<redacted:private_key>");
+        bump(hits, CAT_PRIVATE_KEY);
+        // A block with no END footer (truncated output) is still key material.
+        let after_header = label_start + label_len + "-----".len();
+        rest = match rest[after_header..].find(END) {
+            Some(rel) => {
+                let footer_label = after_header + rel + END.len();
+                match rest[footer_label..].find("-----") {
+                    Some(rel2) => &rest[footer_label + rel2 + "-----".len()..],
+                    None => "",
+                }
+            }
+            None => "",
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +613,58 @@ mod tests {
         assert!(!out.contains("sk-ant-oat01-"));
         assert_eq!(hits.get(CAT_ANTHROPIC_OAUTH), Some(&1));
         assert!(!hits.contains_key(CAT_API_KEY));
+    }
+
+    #[test]
+    fn redacts_private_key_blocks_keeping_surrounding_text() {
+        let input = "$ cat ~/.ssh/id_ed25519\n-----BEGIN OPENSSH PRIVATE KEY-----\n\
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n-----END OPENSSH PRIVATE KEY-----\ndone\n";
+        let (out, hits) = scan(input, &RedactCtx::default());
+        assert_eq!(
+            out,
+            "$ cat ~/.ssh/id_ed25519\n<redacted:private_key>\ndone\n"
+        );
+        assert_eq!(hits.get(CAT_PRIVATE_KEY), Some(&1));
+
+        for label in ["RSA PRIVATE KEY", "PRIVATE KEY", "PGP PRIVATE KEY BLOCK"] {
+            let input = format!("-----BEGIN {label}-----\nAAAA\n-----END {label}-----");
+            let (out, hits) = scan(&input, &RedactCtx::default());
+            assert_eq!(out, "<redacted:private_key>", "label: {label}");
+            assert_eq!(hits.get(CAT_PRIVATE_KEY), Some(&1), "label: {label}");
+        }
+    }
+
+    #[test]
+    fn redacts_unterminated_private_key_to_end() {
+        let (out, hits) = scan(
+            "log: -----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIBx\nMHcCAQEEIBy",
+            &RedactCtx::default(),
+        );
+        assert_eq!(out, "log: <redacted:private_key>");
+        assert_eq!(hits.get(CAT_PRIVATE_KEY), Some(&1));
+    }
+
+    #[test]
+    fn keeps_public_keys_and_certificates() {
+        let input = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n\
+-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----";
+        let (out, hits) = scan(input, &RedactCtx::default());
+        assert_eq!(out, input);
+        assert!(!hits.contains_key(CAT_PRIVATE_KEY));
+    }
+
+    #[test]
+    fn private_key_redaction_idempotent_and_counts_multiple_blocks() {
+        let key = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----";
+        let input = format!("first {key} second {key}");
+        let (once, hits) = scan(&input, &RedactCtx::default());
+        assert_eq!(
+            once,
+            "first <redacted:private_key> second <redacted:private_key>"
+        );
+        assert_eq!(hits.get(CAT_PRIVATE_KEY), Some(&2));
+        let (twice, _) = scan(&once, &RedactCtx::default());
+        assert_eq!(once, twice);
     }
 
     #[test]

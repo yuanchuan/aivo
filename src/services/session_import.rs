@@ -916,15 +916,21 @@ pub async fn import_codex_session(path: &Path) -> Result<ImportedTranscript> {
                     });
                 }
             }
-            "function_call" => {
+            item_type @ ("function_call" | "custom_tool_call") => {
                 let id = codex_call_id(payload);
                 if !id.is_empty() {
-                    let arguments = payload
-                        .get("arguments")
-                        .and_then(|a| a.as_str())
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .or_else(|| payload.get("arguments").cloned())
-                        .unwrap_or(Value::Null);
+                    // custom_tool_call carries freeform `input`, not an
+                    // `arguments` JSON string; wrap it as the wire path does.
+                    let arguments = if item_type == "custom_tool_call" {
+                        json!({"input": payload.get("input").and_then(|s| s.as_str()).unwrap_or("")})
+                    } else {
+                        payload
+                            .get("arguments")
+                            .and_then(|a| a.as_str())
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .or_else(|| payload.get("arguments").cloned())
+                            .unwrap_or(Value::Null)
+                    };
                     events.push(ImportEvent::Assistant {
                         text: None,
                         thinking: None,
@@ -941,7 +947,7 @@ pub async fn import_codex_session(path: &Path) -> Result<ImportedTranscript> {
                     });
                 }
             }
-            "function_call_output" => {
+            "function_call_output" | "custom_tool_call_output" => {
                 let id = codex_call_id(payload);
                 events.push(ImportEvent::ToolResult {
                     id,
@@ -1394,6 +1400,40 @@ mod tests {
         assert_eq!(tool["tool_call_id"], "fc_1");
         assert_eq!(tool["content"], "a.rs\nb.rs");
         assert_eq!(t.origin_model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[tokio::test]
+    async fn codex_pairs_custom_tool_call_and_output() {
+        let jsonl = r#"
+{"type":"session_meta","payload":{"id":"c2","cwd":"/p","model":"gpt-5.5"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix it"}]}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** End Patch","call_id":"ct_1"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"ct_1","output":"Done!"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Patched."}]}}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c2.jsonl");
+        std::fs::write(&path, jsonl).unwrap();
+        let t = import_codex_session(&path).await.unwrap();
+
+        let asst = t
+            .engine_messages
+            .iter()
+            .find(|m| m.get("tool_calls").is_some())
+            .unwrap();
+        assert_eq!(asst["tool_calls"][0]["id"], "ct_1");
+        assert_eq!(asst["tool_calls"][0]["function"]["name"], "apply_patch");
+        let args = asst["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(args.contains("Begin Patch"), "got: {args}");
+        let tool = t
+            .engine_messages
+            .iter()
+            .find(|m| role(m) == "tool")
+            .unwrap();
+        assert_eq!(tool["tool_call_id"], "ct_1");
+        assert_eq!(tool["content"], "Done!");
     }
 
     #[tokio::test]

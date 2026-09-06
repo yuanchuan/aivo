@@ -111,6 +111,17 @@ mod tests {
     }
 
     #[test]
+    fn redact_for_model_masks_catted_private_key() {
+        let (out, hits) = redact_for_model(
+            "$ cat ~/.ssh/id_ed25519\n-----BEGIN OPENSSH PRIVATE KEY-----\n\
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n-----END OPENSSH PRIVATE KEY-----\n",
+        );
+        assert!(out.contains("<redacted:private_key>"), "{out}");
+        assert!(!out.contains("b3BlbnNzaC1rZXktdjEA"));
+        assert!(hits >= 1);
+    }
+
+    #[test]
     fn redact_for_model_masks_secrets_but_keeps_paths() {
         let (out, hits) = redact_for_model(
             "read /Users/me/app/.env\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\nOPENAI=sk-AAAAAAAAAAAAAAAAAAAAAAAA",

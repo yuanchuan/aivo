@@ -99,8 +99,9 @@ pub(super) fn read_file(args: &Value, cwd: &Path) -> Result<String, String> {
     let end = start.saturating_add(limit);
     if end < total {
         out.push_str(&format!(
-            "… ({} more lines; use offset/limit)\n",
-            total - end
+            "… ({} more lines; continue with offset={})\n",
+            total - end,
+            end + 1
         ));
     }
     if oversize {
@@ -111,7 +112,12 @@ pub(super) fn read_file(args: &Value, cwd: &Path) -> Result<String, String> {
     if out.is_empty() {
         out.push_str("(empty or past end of file)");
     }
-    Ok(cap_head(out))
+    Ok(cap_head_resume(out, |whole_lines| {
+        format!(
+            "continue with offset={}",
+            offset.saturating_add(whole_lines)
+        )
+    }))
 }
 
 pub(super) fn list_dir(args: &Value, cwd: &Path) -> Result<String, String> {

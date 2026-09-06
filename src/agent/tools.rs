@@ -261,6 +261,12 @@ fn truncate_on_char_boundary(s: &mut String, max: usize) -> bool {
 
 /// Cap keeping the HEAD — for file reads / listings, where the start matters.
 fn cap_head(s: String) -> String {
+    cap_head_resume(s, |_| "narrow the request to see the rest".to_string())
+}
+
+/// Like [`cap_head`], but the caller turns the count of whole lines kept into a
+/// runnable continuation — the notice hands over the next call, not arithmetic.
+fn cap_head_resume(s: String, resume: impl FnOnce(usize) -> String) -> String {
     let total_lines = s.lines().count();
     let total_bytes = s.len();
     let mut truncated = total_lines > MAX_OUTPUT_LINES;
@@ -272,13 +278,18 @@ fn cap_head(s: String) -> String {
     } else {
         s
     };
-    truncated |= truncate_on_char_boundary(&mut out, MAX_OUTPUT);
+    let byte_cut = truncate_on_char_boundary(&mut out, MAX_OUTPUT);
+    truncated |= byte_cut;
     if truncated {
         let kept_lines = out.lines().count();
         let kept_bytes = out.len();
+        // A byte cut leaves a partial last line; drop it so a resume re-reads
+        // that line instead of skipping its tail.
+        let whole_lines = kept_lines - usize::from(byte_cut && !out.ends_with('\n'));
         out.push_str(&format!(
             "\n… (output truncated: showing the first {kept_lines} of {total_lines} lines, \
-{kept_bytes} of {total_bytes} bytes — narrow the request to see the rest)"
+{kept_bytes} of {total_bytes} bytes — {})",
+            resume(whole_lines)
         ));
     }
     out

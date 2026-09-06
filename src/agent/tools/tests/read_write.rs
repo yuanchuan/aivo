@@ -41,7 +41,29 @@ fn read_file_paging() {
     assert!(out.contains("line3"));
     assert!(out.contains("line4"));
     assert!(!out.contains("line5"));
-    assert!(out.contains("more lines"));
+    assert!(
+        out.contains("6 more lines; continue with offset=5"),
+        "{out}"
+    );
+}
+
+#[test]
+fn read_file_cap_notices_carry_resume_offset() {
+    let dir = tmp();
+    // Line cap: 3000 short lines, so the first 2000 fit under the byte cap.
+    let body: String = (1..=3000).map(|n| format!("L{n}\n")).collect();
+    write_file(&json!({"path":"lines.txt","content":body}), &dir).unwrap();
+    let out = read_file(&json!({"path":"lines.txt"}), &dir).unwrap();
+    assert!(out.contains("continue with offset=2001"), "{out}");
+
+    // Byte cap mid-line: 108-byte rows cut at 30000 = 277 whole lines plus a
+    // partial 278th, which the resume must re-read.
+    let body: String = (1..=400)
+        .map(|_| format!("{}\n", "x".repeat(100)))
+        .collect();
+    write_file(&json!({"path":"wide.txt","content":body}), &dir).unwrap();
+    let out = read_file(&json!({"path":"wide.txt"}), &dir).unwrap();
+    assert!(out.contains("continue with offset=278"), "{out}");
 }
 
 #[test]
