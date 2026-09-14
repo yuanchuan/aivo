@@ -142,7 +142,7 @@ incremental = true
 debug = false
 
 [profile.release]
-opt-level = "z"     # Optimize for size (most aggressive)
+opt-level = "s"     # Optimize for size
 lto = true
 strip = true
 codegen-units = 1
